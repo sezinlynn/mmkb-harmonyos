@@ -1,0 +1,70 @@
+{
+  "module": {
+    "name": "keymagic3",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "Keymagic3Ability",
+    "deviceTypes": [
+      "2in1"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages",
+    "proxyData": [
+      {
+        "uri": "datashareproxy://com.szl.myankey/keymagic3/keyboard-selection"
+      }
+    ],
+    "abilities": [
+      {
+        "name": "Keymagic3Ability",
+        "srcEntry": "./ets/keymagic3ability/Keymagic3Ability.ets",
+        "description": "$string:Keymagic3Ability_desc",
+        "icon": "$media:myankey_icon",
+        "label": "$string:Keymagic3Ability_label",
+        "startWindowIcon": "$media:myankey_icon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true,
+        "skills": [
+          {
+            "entities": [
+              "entity.system.home"
+            ],
+            "actions": [
+              "ohos.want.action.home"
+            ]
+          }
+        ]
+      }
+    ],
+    "extensionAbilities": [
+      {
+        "name": "KeyMagicInputMethodService",
+        "srcEntry": "./ets/ime/KeyMagicInputMethodService.ets",
+        "description": "$string:MyanKeyInputMethodService_desc",
+        "icon": "$media:myankey_icon",
+        "label": "$string:MyanKeyInputMethodService_label",
+        "type": "inputMethod",
+        "exported": true,
+        "metadata": [
+          {
+            "name": "ohos.extension.input_method",
+            "resource": "$profile:input_method_config"
+          }
+        ]
+      },
+      {
+        "name": "Keymagic3BackupAbility",
+        "srcEntry": "./ets/keymagic3backupability/Keymagic3BackupAbility.ets",
+        "type": "backup",
+        "exported": false,
+        "metadata": [
+          {
+            "name": "ohos.extension.backup",
+            "resource": "$profile:backup_config"
+          }
+        ],
+      }
+    ]
+  }
+}

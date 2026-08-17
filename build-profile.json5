@@ -1,0 +1,83 @@
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\Sezin Lynn\\.ohos\\config\\default_keymagic-harmonyos_gUunD0X_EtCwkLuUoadDBlw-jXuNFW4leWWyMAgzl7Y=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001BBE6A85FA60963B8F518E18E3BA7E7FEB3BD88AB1D15C5C1E7517B45BDD7B2CEF14209DC1299AD8",
+          "profile": "C:\\Users\\Sezin Lynn\\.ohos\\config\\default_keymagic-harmonyos_gUunD0X_EtCwkLuUoadDBlw-jXuNFW4leWWyMAgzl7Y=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\Sezin Lynn\\.ohos\\config\\default_keymagic-harmonyos_gUunD0X_EtCwkLuUoadDBlw-jXuNFW4leWWyMAgzl7Y=.p12",
+          "storePassword": "0000001B06F0DC24C3E5551A2C54A0B366972AD7C0E187BEFD5D04A8F9E24C8E9B184E7DA32CB909C781D2"
+        }
+      },
+      {
+        "name": "debug1",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\Sezin Lynn\\.ohos\\config\\debug1_keymagic-harmonyos_gUunD0X_EtCwkLuUoadDBlw-jXuNFW4leWWyMAgzl7Y=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001B10FDAC490579EB4865441FBDDF9938D4A380507D3A9F7AA560431EEC96D68EF177689F89B7784D",
+          "profile": "C:\\Users\\Sezin Lynn\\.ohos\\config\\debug1_keymagic-harmonyos_gUunD0X_EtCwkLuUoadDBlw-jXuNFW4leWWyMAgzl7Y=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\Sezin Lynn\\.ohos\\config\\debug1_keymagic-harmonyos_gUunD0X_EtCwkLuUoadDBlw-jXuNFW4leWWyMAgzl7Y=.p12",
+          "storePassword": "0000001BBF404E8B16FD0A24FA0CC7E4718B63CC130F0320A09E27CCDF1869562AB83355346E0F0A41DFEF"
+        }
+      },
+      {
+        "name": "release",
+        "type": "HarmonyOS",
+        "material": {
+          "storeFile": "C:/Users/Sezin Lynn/Downloads/myankey-release-sign/slkeyboard-release.p12",
+          "storePassword": "0000001C4D594A5D559D46489DCB54829DBA92E4987D7E8C20D38BC6926A6A2997C17C35357B8D3F895FA82E",
+          "keyAlias": "slkeyboardrelease",
+          "keyPassword": "0000001C34E8DBF6191424EF799E9E23EE515173590D67D6CCEB019FA22D8B9FB35F54365A6AC45DF66F742D",
+          "signAlg": "SHA256withECDSA",
+          "profile": "C:/Users/Sezin Lynn/Downloads/myankey-release-sign/MyanKey Release ProfileRelease.p7b",
+          "certpath": "C:/Users/Sezin Lynn/Downloads/myankey-release-sign/SLKeyboard Release Certificate.cer"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "targetSdkVersion": "6.1.1(24)",
+        "compatibleSdkVersion": "6.0.0(20)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "nativeCompiler": "BiSheng",
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug",
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "keymagic3",
+      "srcPath": "./keymagic3",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

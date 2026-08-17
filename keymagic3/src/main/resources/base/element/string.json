@@ -1,0 +1,36 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "MyanKey"
+    },
+    {
+      "name": "Keymagic3Ability_desc",
+      "value": "MyanKey keyboard configurator"
+    },
+    {
+      "name": "Keymagic3Ability_label",
+      "value": "MyanKey"
+    },
+    {
+      "name": "MyanKeyInputMethodService_desc",
+      "value": "MyanKey physical keyboard input method"
+    },
+    {
+      "name": "MyanKeyInputMethodService_label",
+      "value": "MyanKey"
+    },
+    {
+      "name": "KeyMagicSubtypeZawCode_label",
+      "value": "ZawCode"
+    },
+    {
+      "name": "KeyMagicSubtype_label",
+      "value": "မြန်စံ (Smart)"
+    },
+    {
+      "name": "KeyMagicSubtype_label",
+      "value": ""
+    }
+  ]
+}

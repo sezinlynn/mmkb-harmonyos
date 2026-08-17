@@ -1,0 +1,5 @@
+{
+  "libkeymagic3.so": {
+    "source": "src/mock/Libkeymagic3.mock.ets"
+  }
+}

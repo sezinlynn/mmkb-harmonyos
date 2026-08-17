@@ -1,0 +1,7 @@
+{
+  "src": [
+    "pages/KeyboardConfigurator",
+    "pages/Index",
+    "pages/KeyMagicImeStatus"
+  ]
+}

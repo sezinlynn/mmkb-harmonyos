@@ -1,0 +1,11 @@
+{
+  "subtypes": [
+    {
+      "id": "myankey",
+      "label": "$string:MyanKeyInputMethodService_label",
+      "icon": "$media:myankey_icon",
+      "locale": "my-MM",
+      "mode": "lower"
+    }
+  ]
+}

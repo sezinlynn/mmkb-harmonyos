@@ -1,0 +1,40 @@
+{
+  "color": [
+    {
+      "name": "start_window_background",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "keymagic_composition_popup_background_light",
+      "value": "#EAF8FAFC"
+    },
+    {
+      "name": "keymagic_composition_popup_foreground_light",
+      "value": "#1B1F23"
+    },
+    {
+      "name": "keymagic_composition_popup_border_light",
+      "value": "#1F1B1F23"
+    },
+    {
+      "name": "keymagic_composition_popup_shadow_light",
+      "value": "#26000000"
+    },
+    {
+      "name": "keymagic_composition_popup_background_dark",
+      "value": "#E625272C"
+    },
+    {
+      "name": "keymagic_composition_popup_foreground_dark",
+      "value": "#F4F6F8"
+    },
+    {
+      "name": "keymagic_composition_popup_border_dark",
+      "value": "#33FFFFFF"
+    },
+    {
+      "name": "keymagic_composition_popup_shadow_dark",
+      "value": "#66000000"
+    }
+  ]
+}
