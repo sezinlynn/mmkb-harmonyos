@@ -1,35 +1,33 @@
-# KeyMagic 3 HarmonyOS smoke test
+# mmKB for HarmonyOS
 
-This DevEco project is the Milestone 1 HarmonyOS PC/2in1 smoke test. It embeds the existing `keymagic-core` Rust static library in the generated NAPI library and calls the existing C FFI. It does not register a system IME.
+mmKB is a Myanmar and English software keyboard for HarmonyOS phones and tablets. It is a HarmonyOS input-method integration of the [KeyMagic 3](https://github.com/thantthet/keymagic-3) input engine.
 
-## Prerequisites
+## Features
 
-- DevEco Studio's OpenHarmony SDK, with the native SDK installed.
-- Rust with `cargo` and `rustup` available on `PATH`.
-- Rust target `aarch64-unknown-linux-ohos` installed for the selected toolchain.
+- HarmonyOS `inputMethod` extension with a phone/tablet keyboard panel.
+- Myanmar and English virtual keyboards, including numbers, symbols, emoji, and configurable appearance, key preview, haptics, and panel height.
+- KeyMagic-compatible Myanmar keyboard-rule processing using bundled `.km2` layouts.
+- Internal Burmese composition shown by the IME until a real commit boundary.
+- Keyboard-layout selection for ZawCode, မြန်စံ (Smart), and .
 
-Set the SDK root to the directory containing `native/`, for example:
+## KeyMagic integration
 
-```powershell
-$env:OHOS_SDK_HOME = 'C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony'
-```
+The native `libkeymagic3.so` N-API module is built from this repository's HarmonyOS bridge (`keymagic3/src/main/cpp/`) and statically links the upstream `keymagic-core` Rust library. The ArkTS wrapper in `KeyMagicNative.ets` calls that module through the upstream C FFI surface.
 
-## Build
+The expected upstream workspace is KeyMagic 3 version `0.0.11` (or a compatible revision). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution and bundled-layout licensing status.
 
-From the repository root, build the Rust static library before building the HAP:
+## Privacy
 
-```powershell
-.\keymagic-harmonyos\scripts\build-core-ohos.ps1 -Profile debug
-```
+The application source processes keyboard rules and active Myanmar composition locally. It contains no application network client or telemetry path for typed text. Committed text is sent only to the currently focused editor through HarmonyOS input-method APIs. Local preferences are used for keyboard settings and recently used emoji.
 
-Then open `keymagic-harmonyos/` in DevEco Studio and build/deploy the `arm64-v8a` debug target. The CMake project intentionally stops with an actionable error if the required Rust archive is absent.
+## Building
 
-## Smoke test
+See [BUILDING.md](BUILDING.md) for the required DevEco Studio/OpenHarmony SDK, Rust native-library build, signing setup, and HAP build command. Never commit signing material; start from [build-profile.example.json5](build-profile.example.json5).
 
-1. Tap **Create engine**.
-2. Tap **Load bundled .km2**.
-3. Send a debug event, or focus the keyboard-capture area and press a physical key.
-4. Inspect the key codes, modifiers, action, text, delete count, composition, and processed flag.
-5. Tap **Reset engine**, then **Destroy engine** and create it again.
+## License
 
-The page reports actions only. It does not edit another application or provide virtual keyboard behavior.
+This project is distributed under the [GNU General Public License, version 2 only](LICENSE) (`GPL-2.0-only`). KeyMagic 3 is an upstream GPL-2.0 dependency; this repository is a HarmonyOS integration/port and does not claim ownership of upstream KeyMagic code.
+
+## Upstream
+
+- KeyMagic 3: <https://github.com/thantthet/keymagic-3>

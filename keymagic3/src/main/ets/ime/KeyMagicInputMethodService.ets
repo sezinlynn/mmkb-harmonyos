@@ -27,7 +27,7 @@ class KeyMagicPopupEnvironmentCallback extends EnvironmentCallback {
   }
 }
 
-/** Entry point registered as the MyanKey parent input method. */
+/** Entry point registered as the mmKB parent input method. */
 export default class KeyMagicInputMethodService extends InputMethodExtensionAbility {
   private readonly controller: KeyMagicImeController = new KeyMagicImeController();
   private readonly popupEnvironmentCallback: KeyMagicPopupEnvironmentCallback =
@@ -36,7 +36,7 @@ export default class KeyMagicInputMethodService extends InputMethodExtensionAbil
 
   onCreate(want: Want): void {
     hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
-      `IME ABILITY START abilityName=KeyMagicInputMethodService parentLabel=MyanKey ` +
+      `IME ABILITY START abilityName=KeyMagicInputMethodService parentLabel=mmKB ` +
         `wantAbilityName=${want.abilityName === undefined ? '<none>' : want.abilityName}`);
     this.controller.setCompositionPopupDarkMode(
       this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
@@ -50,7 +50,11 @@ export default class KeyMagicInputMethodService extends InputMethodExtensionAbil
       hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `Unable to subscribe to popup appearance changes: ${JSON.stringify(error)}`);
     }
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      'IME EXTENSION onCreate controller.start begin.');
     this.controller.start(this.context);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      'IME EXTENSION onCreate controller.start returned.');
   }
 
   onDestroy(): void {
@@ -63,6 +67,6 @@ export default class KeyMagicInputMethodService extends InputMethodExtensionAbil
     }
     this.controller.stop();
     hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
-      'IME ABILITY STOP abilityName=KeyMagicInputMethodService parentLabel=MyanKey');
+      'IME ABILITY STOP abilityName=KeyMagicInputMethodService parentLabel=mmKB');
   }
 }

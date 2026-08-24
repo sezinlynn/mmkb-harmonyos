@@ -865,7 +865,7 @@ struct Index {
           .onClick(() => this.refreshImeTransportDiagnostics(true))
 
         Divider()
-        Text('MyanKey HarmonyOS engine smoke test')
+        Text('mmKB HarmonyOS engine smoke test')
           .fontSize(24)
           .fontWeight(FontWeight.Bold)
         Text('This page is not a system IME. It only proves the existing Rust engine through NAPI.')

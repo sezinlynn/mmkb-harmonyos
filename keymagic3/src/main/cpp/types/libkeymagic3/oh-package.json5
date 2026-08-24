@@ -2,5 +2,6 @@
   "name": "libkeymagic3.so",
   "types": "./Index.d.ts",
   "version": "1.0.0",
-  "description": "Please describe the basic information."
+  "description": "Local N-API type declarations for mmKB's KeyMagic bridge.",
+  "license": "GPL-2.0-only"
 }

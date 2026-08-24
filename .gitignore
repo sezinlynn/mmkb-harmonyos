@@ -1,13 +1,52 @@
-/node_modules
-/oh_modules
+# Dependency and build directories
+/node_modules/
+/oh_modules/
+/.hvigor/
+/**/build/
+/**/.cxx/
+**/.test/
+/.appanalyzer/
+/build-profile.json5
+
+# Local IDE and SDK configuration
 /local.properties
-/.idea
-**/build
-/.hvigor
-.cxx
-/.clangd
-/.clang-format
-/.clang-tidy
-**/.test
-/.appanalyzer
+/.idea/
+/.vscode/
+*.iml
+.clangd
+.clang-format
+.clang-tidy
+
+# Local signing material: use build-profile.example.json5 as the public template.
+/build-profile.json5
+*.p12
+*.p7b
+*.cer
+*.pem
+*.key
+*.jks
+*.keystore
+*.pfx
+*.mobileprovision
+*.provisionprofile
+
+# Environment files, credentials, and generated release artifacts
+.env
+.env.*
+!.env.example
+*.hap
+*.app
+*.hsp
+*.har
 *.dmp
+*.log
+logs/
+Crash_*.dmp
+
+# Temporary/editor files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~

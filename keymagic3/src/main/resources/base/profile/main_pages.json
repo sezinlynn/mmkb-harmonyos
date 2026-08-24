@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/KeyboardConfigurator",
+    "pages/KeyboardHeightAdjuster",
     "pages/Index",
     "pages/KeyMagicImeStatus"
   ]

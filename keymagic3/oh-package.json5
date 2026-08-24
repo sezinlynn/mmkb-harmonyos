@@ -1,10 +1,10 @@
 {
   "name": "keymagic3",
   "version": "1.0.0",
-  "description": "Please describe the basic information.",
+  "description": "mmKB HarmonyOS input-method integration for KeyMagic 3.",
   "main": "",
   "author": "",
-  "license": "",
+  "license": "GPL-2.0-only",
   "dependencies": {
     "libkeymagic3.so": "file:./src/main/cpp/types/libkeymagic3"
   }

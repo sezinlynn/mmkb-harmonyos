@@ -1,0 +1,53 @@
+// Copy to build-profile.json5 and fill these values locally. Do not commit the
+// copied file, certificates, provisioning profiles, or passwords.
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "<absolute path to your certificate .cer>",
+          "keyAlias": "<your key alias>",
+          "keyPassword": "<local secret>",
+          "profile": "<absolute path to your provisioning profile .p7b>",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "<absolute path to your keystore .p12>",
+          "storePassword": "<local secret>"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "targetSdkVersion": "6.1.1(24)",
+        "compatibleSdkVersion": "6.0.0(20)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "nativeCompiler": "BiSheng",
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      { "name": "debug" },
+      { "name": "release" }
+    ]
+  },
+  "modules": [
+    {
+      "name": "keymagic3",
+      "srcPath": "./keymagic3",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": ["default"]
+        }
+      ]
+    }
+  ]
+}

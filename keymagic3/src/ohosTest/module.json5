@@ -3,7 +3,8 @@
     "name": "keymagic3_test",
     "type": "feature",
     "deviceTypes": [
-      "2in1"
+      "default",
+      "tablet"
     ],
     "deliveryWithInstall": true,
     "installationFree": false

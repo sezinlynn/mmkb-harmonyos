@@ -2,23 +2,23 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "MyanKey"
+      "value": "mmKB"
     },
     {
       "name": "Keymagic3Ability_desc",
-      "value": "MyanKey keyboard configurator"
+      "value": "mmKB — Myanmar Keyboard"
     },
     {
       "name": "Keymagic3Ability_label",
-      "value": "MyanKey"
+      "value": "mmKB"
     },
     {
       "name": "MyanKeyInputMethodService_desc",
-      "value": "MyanKey physical keyboard input method"
+      "value": "mmKB Myanmar Keyboard for HarmonyOS"
     },
     {
       "name": "MyanKeyInputMethodService_label",
-      "value": "MyanKey"
+      "value": "mmKB"
     },
     {
       "name": "KeyMagicSubtypeZawCode_label",

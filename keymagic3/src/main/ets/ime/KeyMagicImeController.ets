@@ -1,15 +1,52 @@
 import { Action, KeyCode, KeyEvent as InputMethodKeyEvent } from '@kit.InputKit';
 import { InputMethodExtensionContext, inputMethodEngine } from '@kit.IMEKit';
+import { display } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { preferences } from '@kit.ArkData';
+import { BusinessError } from '@ohos.base';
+import commonEventManager from '@ohos.commonEventManager';
 import MeasureText from '@ohos.measure';
 import text from '@ohos.graphics.text';
 
-import { keyMagicInputFromInputMethodEvent, KeyMagicVirtualKey } from '../common/KeyMagicKeyMap';
+import {
+  keyMagicInputFromInputMethodEvent,
+  keyMagicInputFromVirtualKey,
+  KeyMagicVirtualKey,
+} from '../common/KeyMagicKeyMap';
 import { KeyMagicActionType, KeyMagicKeyInput, KeyMagicNative, KeyMagicProcessResult } from '../common/KeyMagicNative';
 import { KeyboardInfo } from '../keyboard/KeyboardInfo';
 import { KeyboardManager } from '../keyboard/KeyboardManager';
 import { KeyboardSelection, KeyboardSelectionService } from '../keyboard/KeyboardSelectionService';
+import {
+  KEYBOARD_HEIGHT_FACTOR_DEFAULT,
+  KEYBOARD_HEIGHT_FACTOR_KEY,
+  KEYBOARD_HEIGHT_FACTOR_MAX,
+  KEYBOARD_HEIGHT_FACTOR_MIN,
+  KEYBOARD_HEIGHT_TEST_OFFSET_KEY,
+  KEYBOARD_HAPTIC_APP_STORAGE_KEY,
+  KEYBOARD_HAPTIC_ENABLED_DEFAULT,
+  KEYBOARD_HAPTIC_ENABLED_KEY,
+  KEYBOARD_KEY_PREVIEW_APP_STORAGE_KEY,
+  KEYBOARD_KEY_PREVIEW_ENABLED_DEFAULT,
+  KEYBOARD_KEY_PREVIEW_ENABLED_KEY,
+  KEYBOARD_THEME_APP_STORAGE_KEY,
+  KEYBOARD_THEME_DEFAULT,
+  KeyboardTheme,
+  KEYBOARD_HEIGHT_PREFERENCES_STORE,
+  KEYBOARD_VISUAL_SETTINGS_CHANGED_EVENT,
+  KeyboardHeightSettings,
+  KeyboardVisualSettingsSnapshot,
+  keyboardVisualSettingsIpc,
+} from '../settings/KeyboardHeightSettings';
+import {
+  clearVirtualKeyPressHandler,
+  getVirtualKeyboardLanguageMode,
+  KeyboardLanguageMode,
+  setVirtualKeyboardLanguageMode,
+  setVirtualKeyPressHandler,
+  VirtualKeyPress,
+  VirtualKeyboardCommand,
+} from './VirtualKeyInputBridge';
 
 const IME_LOG_DOMAIN = 0x0000;
 const IME_LOG_TAG = 'KeyMagicIme';
@@ -43,6 +80,8 @@ const COMPOSITION_POPUP_TEXT = 'keymagicImeCompositionPopupText';
 const COMPOSITION_POPUP_TRANSPORT = 'keymagicImeCompositionPopupTransport';
 const COMPOSITION_POPUP_SESSION = 'keymagicImeCompositionPopupSession';
 const COMPOSITION_POPUP_COLOR_MODE = 'keymagicImeCompositionPopupColorMode';
+const VIRTUAL_SHIFT_ACTIVE = 'keymagicImeVirtualShiftActive';
+const KEYBOARD_PANEL_VISIBLE = 'keymagicImeKeyboardPanelVisible';
 const DIRECT_TEXT_SNAPSHOT_LENGTH = 32;
 const DIRECT_ENGINE_CONTEXT_LENGTH = 40;
 const COMPOSITION_POPUP_MIN_WIDTH = 56;
@@ -67,6 +106,35 @@ const COMPOSITION_POPUP_RECT_EPSILON = 1;
 const COMPOSITION_POPUP_CARET_GAP = 8;
 const COMPOSITION_POPUP_WINDOW_MARGIN = 24;
 const KEYBOARD_SWITCH_FEEDBACK_DURATION_MS = 1400;
+// Myanmar clusters need a genuine keycap-height allocation, not a smaller
+// font. The panel rectangle is expressed in pixels while ArkUI rows are vp.
+// 360vp gives Low/Default/High room to differ on phone displays while the
+// independent 280vp content floor prevents Myanmar rows from clipping.
+const FIXED_KEYBOARD_MIN_LAYOUT_HEIGHT_VP = 360;
+// 280vp holds the fixed composition strip plus four Myanmar-safe key rows.
+// It is independent of the selected factor so the Low end is visibly smaller
+// but never clips any row.
+const FIXED_KEYBOARD_SAFE_MIN_LAYOUT_HEIGHT_VP = 220;
+const FIXED_KEYBOARD_WIDTH_HEIGHT_RATIO = 0.52;
+// A calling window is already reduced by the displayed IME on many phone
+// apps. It must never become the ceiling for a fixed keyboard panel or the
+// whole slider range can collapse to one value. Use the display coordinate
+// space used by PanelRect instead.
+const FIXED_KEYBOARD_DISPLAY_HEIGHT_RATIO = 0.72;
+const FIXED_KEYBOARD_MIN_FACTOR_VISIBLE_RATIO = 0.60;
+const KEYBOARD_HEIGHT_LIVE_THROTTLE_MS = 40;
+const KEYBOARD_PREFERENCE_FLUSH_SETTLE_MS = 90;
+const BACKSPACE_DELETE_WATCHDOG_MS = 300;
+
+interface FixedKeyboardHeightMetrics {
+  factor: number;
+  baseHeight: number;
+  desiredHeight: number;
+  safeMinimum: number;
+  safeMaximum: number;
+  finalHeight: number;
+  directTestOffsetPixels: number;
+}
 
 interface DirectEditorSnapshot {
   cursor: number | undefined;
@@ -103,7 +171,7 @@ interface HandledPhysicalKeyState {
 
 type DirectTransactionKind = 'INSERT' | 'DELETE' | 'DELETE_AND_INSERT';
 type DirectTransactionPhase = 'IDLE' | 'WAITING_INSERT_ACK' | 'WAITING_DELETE_ACK' |
-  'WAITING_FINAL_INSERT_ACK';
+'WAITING_FINAL_INSERT_ACK';
 
 interface PendingDirectTransaction {
   id: number;
@@ -136,6 +204,48 @@ interface CompositionPopupSize {
   height: number;
 }
 
+interface ImeRuntimeError {
+  code?: number;
+  message?: string;
+}
+
+// Only deletion crosses the compatibility bridge asynchronously.  Device
+// evidence shows that Android-container editors accept insertTextSync(), while
+// deleteForwardSync() can block the IME main thread for seconds.
+type EditorOperationType = 'DELETE_LEFT' | 'DELETE_BACKWARD';
+
+/** A single asynchronous mutation sent to the focused editor through InputClient. */
+interface QueuedEditorOperation {
+  id: number;
+  session: number;
+  client: inputMethodEngine.InputClient;
+  type: EditorOperationType;
+  length: number | undefined;
+  reason: string;
+  enqueuedAt: number;
+  startedAt: number | undefined;
+}
+
+/** One printable English character awaiting its own deferred event-loop turn. */
+interface DeferredEnglishInsert {
+  id: number;
+  session: number;
+  client: inputMethodEngine.InputClient;
+  text: string;
+  operation: string;
+  enqueuedAt: number;
+}
+
+/** One committed-text Backspace awaiting a later event-loop turn. */
+interface DeferredBackspaceDelete {
+  id: number;
+  session: number;
+  client: inputMethodEngine.InputClient;
+  isRepeat: boolean;
+  operation: string;
+  enqueuedAt: number;
+}
+
 interface CompositionPopupLayout {
   measuredWidth: number;
   paragraphHeight: number;
@@ -147,8 +257,8 @@ interface CompositionPopupLayout {
 
 /**
  * Owns the existing KeyMagic NAPI engine for one InputMethodExtensionAbility.
- * It deliberately has no virtual-keyboard logic: the KeyboardDelegate is the
- * sole input source in this physical-keyboard beta.
+ * Physical KeyboardDelegate events and virtual-panel presses meet only at the
+ * shared KeyMagic processing boundary below.
  */
 export class KeyMagicImeController {
   private readonly native: KeyMagicNative = new KeyMagicNative();
@@ -163,8 +273,38 @@ export class KeyMagicImeController {
   private keyboardDelegate: inputMethodEngine.KeyboardDelegate | undefined;
   private inputClient: inputMethodEngine.InputClient | undefined;
   private panel: inputMethodEngine.Panel | undefined;
+  // Panel creation is session-bound because inputStart supplies the focused
+  // editor whose calling-window bounds define the fixed keyboard rectangle.
+  private panelInitialization: Promise<void> | undefined;
+  private fixedKeyboardPanelRect: CompositionPopupRect | undefined;
   private keyboardLoaded: boolean = false;
   private started: boolean = false;
+  // This is only the temporary virtual Shift-key state. It is converted into
+  // the same modifier flag a physical shifted key carries, never into Burmese
+  // text or an independent composition buffer.
+  private virtualShiftActive: boolean = false;
+  // InputClient calls can cross an Android-compatibility bridge. Deletion has
+  // its existing Promise queue; virtual-English text uses a separate deferred
+  // FIFO that never waits for an insert Promise to settle.
+  private editorTransportSession: number = 0;
+  private nextEditorOperationId: number = 1;
+  private editorOperationQueue: QueuedEditorOperation[] = [];
+  private editorOperationInFlight: QueuedEditorOperation | undefined;
+  private backspaceHeld: boolean = false;
+  private coalescedBackspaceRepeatRequested: boolean = false;
+  // Each deferred callback intentionally outlives the ArkUI/MMI touch event
+  // that queued it. It invokes one character and then schedules the next turn.
+  private nextDeferredInsertId: number = 1;
+  private deferredEnglishInsertQueue: DeferredEnglishInsert[] = [];
+  private deferredEnglishDrainScheduled: boolean = false;
+  private deferredInsertId: number | undefined;
+  private deferredInsertSession: number = 0;
+  // Committed Backspace follows the same ANCO-safe timing rule as English text:
+  // the touch/repeat callback only queues work; deleteForward() runs later and
+  // Promise settlement never paces the hold-repeat cadence.
+  private nextDeferredBackspaceDeleteId: number = 1;
+  private deferredBackspaceDeleteQueue: DeferredBackspaceDelete[] = [];
+  private deferredBackspaceDrainScheduled: boolean = false;
 
   // All editors use the same internal-composition transport. The focused
   // document changes only when the existing composition-boundary code commits
@@ -223,11 +363,26 @@ export class KeyMagicImeController {
   private compositionPopupActualHeight: number | undefined;
   private compositionPopupWindowRect: CompositionPopupRect | undefined;
   private compositionPopupWindowPositionRequested: boolean = false;
-  // Presentation-only feedback shown after Ctrl+Shift+Z changes MyanKey's
+  // Presentation-only feedback shown after Ctrl+Shift+Z changes mmKB's
   // active keyboard. It never becomes engine composition or editor text.
   private keyboardSwitchFeedback: string = '';
   private keyboardSwitchFeedbackToken: number = 0;
   private diagnosticsPreferences: preferences.Preferences | undefined;
+  // Kept separate from diagnostics because this observer drives only fixed
+  // keyboard geometry. It never touches KeyMagic, composition, or editor IPC.
+  private keyboardHeightPreferences: preferences.Preferences | undefined;
+  private keyboardVisualSettingsSubscriber: commonEventManager.CommonEventSubscriber | undefined;
+  private keyboardVisualSettingsIpcStarted: boolean = false;
+  private keyboardHeightFactor: number = KEYBOARD_HEIGHT_FACTOR_DEFAULT;
+  // This is intentionally independent from the saved factor. It is a device
+  // diagnostic which proves a live PanelRect change by requesting ±150px.
+  private keyboardHeightTestOffsetPixels: number = 0;
+  private keyboardHeightApplyTimer: number = -1;
+  private keyboardPreferenceReloadTimer: number = -1;
+  private keyboardHeightPollTimer: number = -1;
+  private keyboardHapticEnabled: boolean = KEYBOARD_HAPTIC_ENABLED_DEFAULT;
+  private keyboardKeyPreviewEnabled: boolean = KEYBOARD_KEY_PREVIEW_ENABLED_DEFAULT;
+  private keyboardTheme: KeyboardTheme = KEYBOARD_THEME_DEFAULT;
   private diagnosticKey: string = 'No physical key-down event yet';
   private diagnosticEngineAction: string = '—';
   private diagnosticEngineText: string = '—';
@@ -235,6 +390,7 @@ export class KeyMagicImeController {
   private diagnosticEngineComposition: string = '—';
   private diagnosticPreviewText: string = '—';
   private diagnosticPreviewRange: string = '—';
+  private editorEnterKeyType: number = inputMethodEngine.ENTER_KEY_TYPE_NEWLINE;
   private diagnosticEditorPreviewSupport: string = 'unknown (waiting for editorAttributeChanged)';
   private diagnosticPreviewResult: string = 'not called';
   private diagnosticPreviewActive: string = 'false';
@@ -261,43 +417,149 @@ export class KeyMagicImeController {
     }
   };
 
+  /** Receives visual keyboard preference changes from the ordinary application process. */
+  private readonly onKeyboardHeightPreferenceChanged = (key: string): void => {
+    if (this.imeContext === undefined) {
+      return;
+    }
+    // On the connected device this signal is intermittent and may precede
+    // visibility of a remote flush in the cached Preferences object. The
+    // app-scoped CommonEvent below is the authoritative live update path.
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `HEIGHT multiprocess event observed key=${key} action=common-event-primary`);
+  };
+
+  /** Receives exact, post-flush visual preferences from the application process. */
+  private readonly onKeyboardVisualSettingsChanged = (event: commonEventManager.CommonEventData): void => {
+    if (event.data === undefined || event.data.length === 0) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        'HEIGHT common-event received without data action=ignored');
+      return;
+    }
+    const values = event.data.split('|');
+    if (values.length < 5) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT common-event invalid data=${event.data}`);
+      return;
+    }
+    const parsedFactor = Number(values[0]);
+    const parsedTestOffset = Number(values[1]);
+    if (!Number.isFinite(parsedFactor) || !Number.isFinite(parsedTestOffset)) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT common-event invalid numeric data=${event.data}`);
+      return;
+    }
+    const hasThemeField = values.length >= 6;
+    const theme = hasThemeField ? KeyboardHeightSettings.normalizeTheme(values[4]) : KEYBOARD_THEME_DEFAULT;
+    const reason = hasThemeField ? values[5] : values[4];
+    this.applyKeyboardVisualSettingsSnapshot({
+      factor: KeyboardHeightSettings.normalize(parsedFactor),
+      testOffsetPixels: Math.max(-300, Math.min(300, Math.round(parsedTestOffset))),
+      hapticEnabled: values[2] === '1',
+      keyPreviewEnabled: values[3] === '1',
+      theme,
+    }, `common-event:${reason}`);
+  };
+
+  /** Uses the same state application path for system Data Proxy and CommonEvent delivery. */
+  private applyKeyboardVisualSettingsSnapshot(snapshot: KeyboardVisualSettingsSnapshot, source: string): void {
+    const previousFactor = this.keyboardHeightFactor;
+    const previousTestOffset = this.keyboardHeightTestOffsetPixels;
+    this.keyboardHeightFactor = KeyboardHeightSettings.normalize(snapshot.factor);
+    this.keyboardHeightTestOffsetPixels = Math.max(-300, Math.min(300, Math.round(snapshot.testOffsetPixels)));
+    this.keyboardHapticEnabled = snapshot.hapticEnabled;
+    this.keyboardKeyPreviewEnabled = snapshot.keyPreviewEnabled;
+    this.keyboardTheme = KeyboardHeightSettings.normalizeTheme(snapshot.theme);
+    this.publishKeyboardVisualPreferences();
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `HEIGHT visual settings received source=${source} factor=${this.keyboardHeightFactor} ` +
+        `directTestOffsetPixels=${this.keyboardHeightTestOffsetPixels} haptic=${this.keyboardHapticEnabled} ` +
+        `keyPreview=${this.keyboardKeyPreviewEnabled} theme=${this.keyboardTheme}`);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `HAPTIC setting loaded enabled=${this.keyboardHapticEnabled} source=${source}`);
+    if (Math.abs(previousFactor - this.keyboardHeightFactor) >= 0.005 ||
+      previousTestOffset !== this.keyboardHeightTestOffsetPixels) {
+      this.scheduleLiveKeyboardHeight(
+        previousTestOffset !== this.keyboardHeightTestOffsetPixels ? 'direct-panel-test' : 'visual-settings-factor',
+        previousTestOffset !== this.keyboardHeightTestOffsetPixels,
+      );
+    }
+  }
+
   private readonly onInputStart = (
     _keyboardController: inputMethodEngine.KeyboardController,
     inputClient: inputMethodEngine.InputClient,
   ): void => {
     this.inputClient = inputClient;
+    this.startKeyboardHeightPreferencePolling();
+    this.beginEditorTransportSession('inputStart');
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `IME inputStart clientBound=true panelExists=${this.panel !== undefined} ` +
+        `panelInitializing=${this.panelInitialization !== undefined} ` +
+        `transport=${this.currentTransport()}`);
+    this.setVirtualShiftActive(false);
     this.resetInputSessionState();
     this.resetTransportDiagnostics();
     this.resetForInputSession('inputStart');
     void this.refreshKeyboardSelectionFromIpc('inputStart');
     this.ensureIpcKeyboardLoaded('inputStart cached IPC selection');
-    // Read-only geometry used only to position a panel if a composition starts
-    // before the client publishes cursorContextChange.
-    this.requestCompositionPopupWindowPosition();
+    void this.logFocusedEditorContext(inputClient, 'inputStart');
+    // Create/configure/show only after an active editor supplies its window
+    // geometry. This is the fixed SOFT_KEYBOARD panel lifecycle for mobile.
+    void this.ensureFixedKeyboardPanelForActiveSession('inputStart');
   };
-
   private readonly onInputStop = (): void => {
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `IME inputStop panelExists=${this.panel !== undefined} internalCompositionLength=${this.internalComposition.length} ` +
+        `rect=${this.describeFixedKeyboardPanelRect()} transport=${this.currentTransport()}`);
     this.commitCompositionAndReset('inputStop');
+    this.releaseVirtualBackspace('inputStop');
+    this.clearDeferredBackspaceDeleteQueue('inputStop');
+    this.clearDeferredEnglishInsertQueue('inputStop');
     this.inputClient = undefined;
+    this.stopKeyboardHeightPreferencePolling();
+    this.setKeyboardPanelVisible(false);
+    this.hideCompositionPopup();
   };
-
   private readonly onKeyboardShow = (): void => {
-    this.publishCompositionPopup();
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `IME keyboardShow panelExists=${this.panel !== undefined} rect=${this.describeFixedKeyboardPanelRect()}`);
+    void this.ensureFixedKeyboardPanelForActiveSession('keyboardShow');
   };
 
   private readonly onKeyboardHide = (): void => {
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `IME keyboardHide panelExists=${this.panel !== undefined} rect=${this.describeFixedKeyboardPanelRect()}`);
+    this.setKeyboardPanelVisible(false);
     this.hideCompositionPopup();
+  };
+
+  private readonly onPanelShow = (): void => {
+    this.setKeyboardPanelVisible(true);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `IME panel show event rect=${this.describeFixedKeyboardPanelRect()}`);
+  };
+
+  private readonly onPanelHide = (): void => {
+    this.setKeyboardPanelVisible(false);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `IME panel hide event rect=${this.describeFixedKeyboardPanelRect()}`);
   };
 
   private readonly onKeyEvent = (event: InputMethodKeyEvent): boolean => {
     return this.handlePhysicalKeyEvent(event);
   };
 
+  private readonly onVirtualKeyPress = (press: VirtualKeyPress): void => {
+    this.handleVirtualKeyPress(press);
+  };
+
   private readonly onCursorContextChange = (x: number, y: number, height: number): void => {
-    this.compositionPopupCursorX = x;
-    this.compositionPopupCursorY = y;
-    this.compositionPopupCursorHeight = height;
-    this.positionCompositionPopup();
+    // Keep the delegate subscription intact for the existing IME lifecycle,
+    // but a fixed virtual keyboard must not follow the editor caret.
+    void x;
+    void y;
+    void height;
   };
 
   // This is observation only. In particular, it never calls adjustPanelRect()
@@ -306,12 +568,16 @@ export class KeyMagicImeController {
     this.compositionPopupActualWidth = size.width;
     this.compositionPopupActualHeight = size.height;
     hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
-      `Composition popup sizeChange actual=${size.width}x${size.height} ` +
-        `requested=${this.describeCompositionPopupRect(this.compositionPopupLastRequestedRect)}`);
+      `IME panel sizeChange actual=${size.width}x${size.height} ` +
+        `fixedRect=${this.describeFixedKeyboardPanelRect()} ` +
+        `legacyRequestedRect=${this.describeCompositionPopupRect(this.compositionPopupLastRequestedRect)}`);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `HEIGHT panel sizeChange actual=${size.width}x${size.height} currentRect=${this.describeFixedKeyboardPanelRect()}`);
     this.logCompositionPopupRenderTrace(this.compositionPopupUiGeneration);
   };
 
   private readonly onEditorAttributeChanged = (attribute: inputMethodEngine.EditorAttribute): void => {
+    this.editorEnterKeyType = attribute.enterKeyType;
     this.diagnosticEditorPreviewSupport = 'ignored: universal internal composition';
     this.diagnosticEditorIdentity = this.describeEditor(attribute);
     this.diagnosticPreviewResult = 'disabled: universal popup composition';
@@ -319,10 +585,48 @@ export class KeyMagicImeController {
     this.diagnosticPreviewActive = 'false';
     hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
       `EDITOR COMPATIBILITY editor=${this.diagnosticEditorIdentity} ` +
-      `transport=${this.currentTransport()}`);
+        `transport=${this.currentTransport()} callerKind=unknown-no-public-container-flag`);
     this.publishCompositionPopup();
     this.publishTransportDiagnostics();
   };
+
+  /**
+   * Public SDK inspection only. EditorAttribute and WindowInfo do not expose
+   * an Android-container bit, so this deliberately records their available
+   * metadata without inferring container status from a bundle-name pattern.
+   */
+  private async logFocusedEditorContext(
+    inputClient: inputMethodEngine.InputClient,
+    source: string,
+  ): Promise<void> {
+    try {
+      const attribute = await inputClient.getEditorAttribute();
+      if (this.inputClient !== inputClient) {
+        return;
+      }
+      this.editorEnterKeyType = attribute.enterKeyType;
+      this.diagnosticEditorIdentity = this.describeEditor(attribute);
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME CALLER INFO source=${source} editor=${this.diagnosticEditorIdentity} ` +
+          'callerKind=unknown-no-public-container-flag');
+    } catch (error) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME CALLER INFO editorAttribute result=error source=${source} error=${this.describeRuntimeError(error)}`);
+    }
+
+    try {
+      const windowInfo = await inputClient.getCallingWindowInfo();
+      if (this.inputClient !== inputClient) {
+        return;
+      }
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME CALLER WINDOW source=${source} rect=${windowInfo.rect.left},${windowInfo.rect.top},` +
+          `${windowInfo.rect.width}x${windowInfo.rect.height} status=${windowInfo.status}`);
+    } catch (error) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME CALLER WINDOW result=error source=${source} error=${this.describeRuntimeError(error)}`);
+    }
+  }
 
   private readonly onSelectionChange = (
     oldBegin: number,
@@ -332,6 +636,10 @@ export class KeyMagicImeController {
   ): void => {
     this.lastSelectionBegin = newBegin;
     this.lastSelectionEnd = newEnd;
+    if (this.deferredInsertId !== undefined && this.deferredInsertSession === this.editorTransportSession) {
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `DEFERRED INSERT selectionChange id=${this.deferredInsertId} old=${oldBegin},${oldEnd} new=${newBegin},${newEnd}`);
+    }
     if (this.directCommitInProgress) {
       this.recordDirectFallbackCallback(
         'SELECTION',
@@ -342,31 +650,26 @@ export class KeyMagicImeController {
     }
     this.recordDirectFallbackCallback(
       'SELECTION',
-      `old=${oldBegin},${oldEnd} new=${newBegin},${newEnd} ` +
-        'classification=external; action=commit internal composition/reset engine',
+      `old=${oldBegin},${oldEnd} new=${newBegin},${newEnd} classification=observed ` +
+        `internalCompositionLength=${this.internalComposition.length} ` +
+        'action=preserve internal composition; editor-mutation=none',
     );
-    if (this.internalComposition.length > 0) {
-      this.commitCompositionAndReset('direct editor selection change');
-    }
   };
 
   private readonly onTextChange = (text: string): void => {
     if (this.directCommitInProgress) {
       this.recordDirectFallbackCallback(
         'TEXT',
-        `text=${this.formatTextWithCodePoints(text)} classification=IME-generated ` +
+        `textLength=${text.length} classification=IME-generated ` +
           'operation=internal composition commit',
       );
       return;
     }
     this.recordDirectFallbackCallback(
       'TEXT',
-      `text=${this.formatTextWithCodePoints(text)} ` +
-        'classification=external; action=commit internal composition/reset engine',
+      `textLength=${text.length} classification=observed internalCompositionLength=${this.internalComposition.length} ` +
+        'action=preserve internal composition; editor-mutation=none',
     );
-    if (this.internalComposition.length > 0) {
-      this.commitCompositionAndReset('direct editor text change');
-    }
   };
 
   start(context: InputMethodExtensionContext): void {
@@ -375,6 +678,12 @@ export class KeyMagicImeController {
     }
     this.started = true;
     this.imeContext = context;
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s', 'IME controller start begin.');
+    this.setVirtualShiftActive(false);
+    setVirtualKeyPressHandler(this.onVirtualKeyPress);
+    this.initializeKeyboardHeightPreference(context);
+    this.initializeKeyboardVisualSettingsIpc();
+    this.initializeKeyboardVisualSettingsSignal(context);
     this.initializeTransportDiagnostics(context);
     try {
       this.inputMethodAbility = inputMethodEngine.getInputMethodAbility();
@@ -387,14 +696,16 @@ export class KeyMagicImeController {
       this.keyboardDelegate.on('cursorContextChange', this.onCursorContextChange);
       this.keyboardDelegate.on('editorAttributeChanged', this.onEditorAttributeChanged);
       this.keyboardDelegate.on('selectionChange', this.onSelectionChange);
-      this.keyboardDelegate.on('textChange', this.onTextChange);
+      // Deliberately disabled for the one-key deferred-insert timing probe.
+      // Keep selectionChange registered as the editor-side acknowledgement.
     } catch (error) {
       hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `Unable to subscribe to IME callbacks: ${JSON.stringify(error)}`);
       return;
     }
 
-    this.initializeEngineAndPanel(context);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s', 'IME controller subscriptions registered.');
+    void this.initializeEngine();
   }
 
   /** Updates panel-only color state; this has no IME transport side effects. */
@@ -402,14 +713,57 @@ export class KeyMagicImeController {
     AppStorage.setOrCreate(COMPOSITION_POPUP_COLOR_MODE, isDark ? 'dark' : 'light');
   }
 
+  private describeRuntimeError(error: Object | undefined | null): string {
+    if (error === undefined || error === null) {
+      return `code=<none> message=<none> raw=${error === null ? 'null' : '<undefined>'}`;
+    }
+    const runtimeError = error as ImeRuntimeError;
+    const code = runtimeError.code === undefined ? '<none>' : `${runtimeError.code}`;
+    const message = runtimeError.message === undefined ? '<none>' : runtimeError.message;
+    let raw: string;
+    try {
+      raw = JSON.stringify(error);
+    } catch (_serializationError) {
+      raw = '<unserializable>';
+    }
+    return `code=${code} message=${message} raw=${raw}`;
+  }
+
   stop(): void {
     this.commitCompositionAndReset('IME destroy');
+    this.releaseVirtualBackspace('IME destroy');
+    this.clearDeferredBackspaceDeleteQueue('IME destroy');
+    this.stopKeyboardHeightPreferencePolling();
+    this.editorOperationQueue = [];
+    clearVirtualKeyPressHandler(this.onVirtualKeyPress);
+    this.setVirtualShiftActive(false);
     this.keyboardLoaded = false;
     this.currentKeyboardSelection = undefined;
     this.loadedKeyboardId = undefined;
     this.loadedKeyboardGeneration = -1;
     this.inputClient = undefined;
     this.started = false;
+    if (this.keyboardHeightPreferences !== undefined) {
+      try {
+        this.keyboardHeightPreferences.off('multiProcessChange', this.onKeyboardHeightPreferenceChanged);
+      } catch (error) {
+        hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `IME panel height preference listener removal failed: ${this.describeRuntimeError(error)}`);
+      }
+      this.keyboardHeightPreferences = undefined;
+    }
+    if (this.keyboardVisualSettingsSubscriber !== undefined) {
+      const subscriber = this.keyboardVisualSettingsSubscriber;
+      this.keyboardVisualSettingsSubscriber = undefined;
+      try {
+        commonEventManager.unsubscribe(subscriber);
+        hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          'HEIGHT common-event subscriber removed');
+      } catch (error) {
+        hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `HEIGHT common-event subscriber removal failed: ${this.describeRuntimeError(error)}`);
+      }
+    }
     this.imeContext = undefined;
 
     if (this.keyboardDelegate !== undefined) {
@@ -417,7 +771,6 @@ export class KeyMagicImeController {
       this.keyboardDelegate.off('cursorContextChange', this.onCursorContextChange);
       this.keyboardDelegate.off('editorAttributeChanged', this.onEditorAttributeChanged);
       this.keyboardDelegate.off('selectionChange', this.onSelectionChange);
-      this.keyboardDelegate.off('textChange', this.onTextChange);
       this.keyboardDelegate = undefined;
     }
     if (this.inputMethodAbility !== undefined) {
@@ -427,15 +780,19 @@ export class KeyMagicImeController {
       this.inputMethodAbility.off('keyboardHide', this.onKeyboardHide);
       if (this.panel !== undefined) {
         this.panel.off('sizeChange', this.onCompositionPopupSizeChange);
-        this.destroyPanel(this.inputMethodAbility, this.panel);
+        this.panel.off('show', this.onPanelShow);
+        this.panel.off('hide', this.onPanelHide);
+        void this.destroyPanel(this.inputMethodAbility, this.panel, 'IME stop');
       }
       this.inputMethodAbility = undefined;
     }
     this.panel = undefined;
+    this.panelInitialization = undefined;
+    this.fixedKeyboardPanelRect = undefined;
     this.native.destroyEngine();
   }
-
-  private async initializeEngineAndPanel(context: InputMethodExtensionContext): Promise<void> {
+  private async initializeEngine(): Promise<void> {
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s', 'IME engine initialization begin.');
     try {
       const selection = await this.keyboardSelectionService.startObserving(this.onKeyboardSelectionIpcChanged);
       this.currentKeyboardSelection = selection;
@@ -444,26 +801,14 @@ export class KeyMagicImeController {
           `keyboardGeneration=${selection.keyboardGeneration} source=IME-engine-initialization`);
       this.native.createEngine();
       if (!this.ensureIpcKeyboardLoaded('IME engine initialization')) {
-        throw new Error('Unable to load the IPC-authoritative MyanKey keyboard selection.');
+        throw new Error('Unable to load the IPC-authoritative mmKB keyboard selection.');
       }
-
-      if (this.inputMethodAbility === undefined) {
-        return;
-      }
-      const panel = await this.inputMethodAbility.createPanel(context, {
-        type: inputMethodEngine.PanelType.SOFT_KEYBOARD,
-        flag: inputMethodEngine.PanelFlag.FLG_FLOATING,
-      });
-      await panel.setUiContent(IME_PANEL_PAGE);
-      this.panel = panel;
-      panel.on('sizeChange', this.onCompositionPopupSizeChange);
-      this.publishCompositionPopup();
       hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
-        'Floating KeyMagic composition panel created.');
+        'IME engine initialization succeeded; awaiting inputStart for keyboard panel creation.');
     } catch (error) {
       this.keyboardLoaded = false;
       hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
-        `Unable to initialize KeyMagic IME: ${JSON.stringify(error)}`);
+        `IME engine initialization failed: ${this.describeRuntimeError(error)}`);
     }
   }
 
@@ -489,7 +834,7 @@ export class KeyMagicImeController {
       if (matchedHandledDown) {
         this.appendDirectFallbackTrace(
           `DIRECT FALLBACK EVENT: rawKeyCode=${event.key.code}; action=UP; ` +
-          'processed=false; direct-transaction=not-run; returned-consumed=true; matched-handled-DOWN=true',
+            'processed=false; direct-transaction=not-run; returned-consumed=true; matched-handled-DOWN=true',
         );
       }
       return this.finishPhysicalKeyEvent(
@@ -536,7 +881,7 @@ export class KeyMagicImeController {
         repeatDown, repeatCount);
     }
 
-    // MyanKey owns internal KM2 selection. Intercept the development shortcut
+    // mmKB owns internal KM2 selection. Intercept the development shortcut
     // before the ordinary Ctrl-shortcut pass-through path, so Z never reaches
     // KeyMagic or the focused editor.
     if (this.isKeyboardCycleHotkey(event)) {
@@ -553,7 +898,7 @@ export class KeyMagicImeController {
         false,
         'not-run',
         'PRESERVE',
-        switched ? 'MyanKey Ctrl+Shift+Z keyboard cycle' : 'MyanKey keyboard cycle failed',
+        switched ? 'mmKB Ctrl+Shift+Z keyboard cycle' : 'mmKB keyboard cycle failed',
       );
       return this.finishPhysicalKeyEvent(event, 'not-run', switched ? 'keyboard-cycle' : 'keyboard-cycle-failed',
         true, priorHandledKey !== undefined, repeatDown, repeatCount);
@@ -624,20 +969,19 @@ export class KeyMagicImeController {
     let processed = false;
     let directTransactionRan = false;
     try {
-      const compositionBefore = this.internalComposition;
-      const output = this.native.processKey(input, 'InputMethod KeyboardDelegate');
-      processed = output.isProcessed;
-      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
-        `PROCESS KEY keyboardId=${this.loadedKeyboardId === undefined ? '<none>' : this.loadedKeyboardId} ` +
-          `generation=${this.loadedKeyboardGeneration} ` +
-          `engineId=${output.engineId} runtimeKeyboardId=${output.runtimeKeyboardId} ` +
-          `rawKeyCode=${event.key.code} key=${input.keyCode} shift=${input.shift === true} ` +
-          `compositionBefore=${this.formatTextWithCodePoints(compositionBefore)} ` +
-          `outputText=${this.formatTextWithCodePoints(output.text)} ` +
-          `outputComposition=${this.formatTextWithCodePoints(output.composingText)} ` +
-          `outputCodepoints=${this.formatTextWithCodePoints(output.text.length > 0 ? output.text : output.composingText)}`);
-      this.recordEngineOutput(input, output);
-      if (!output.isProcessed) {
+      processed = this.processKeyMagicInput(
+        input,
+        'InputMethod KeyboardDelegate',
+        event.key.code,
+        (wasProcessed: boolean): void => {
+          // Preserve the physical failure path's existing ownership rule: if
+          // native KeyMagic accepted the DOWN before an editor operation
+          // fails, the corresponding UP and raw text must still be consumed.
+          processed = wasProcessed;
+          directTransactionRan = wasProcessed;
+        },
+      );
+      if (!processed) {
         // This matches the Windows, macOS, and IBus adapters: first finish
         // the current composition, then let the original key reach the app.
         this.logCompositionBoundaryCheck(
@@ -648,31 +992,16 @@ export class KeyMagicImeController {
           'COMMIT',
           'unhandled non-modifier KeyMagic key',
         );
-        this.commitCompositionAndReset('unhandled KeyMagic key');
         return this.finishPhysicalKeyEvent(event, 'false', 'not-run', false, priorHandledKey !== undefined,
           repeatDown, repeatCount);
       }
 
-      directTransactionRan = true;
-      this.logCompositionBoundaryCheck(event, input.keyCode, false, 'true', 'PROCESS', 'KeyMagic handled printable key');
-      this.applyEngineOutput(this.inputClient, output, event.key.code);
-      if (this.shouldCommitProcessedComposition(input.keyCode, output)) {
-        this.logCompositionBoundaryCheck(
-          event,
-          input.keyCode,
-          false,
-          'true',
-          'COMMIT',
-          'existing processed composition boundary',
-        );
-        this.commitCompositionAndReset('processed composition boundary');
-      }
       const directTransactionStatus = directTransactionRan ?
         (this.internalComposition.length > 0 ? 'composition-held' : 'commit-or-immediate') : 'not-run';
       this.recordHandledPhysicalKey(event, input, this.inputClient, directTransactionStatus, fromPendingQueue);
       hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `Consumed physical key. returned-consumed=true transport=${this.currentTransport()} ` +
-        `action=${output.actionType} delete_count=${output.deleteCount} composing=${output.composingText}`);
+          `processed=${processed} composition=${this.formatTextWithCodePoints(this.internalComposition)}`);
       return this.finishPhysicalKeyEvent(event, 'true', directTransactionStatus, true,
         priorHandledKey !== undefined, repeatDown, repeatCount);
     } catch (error) {
@@ -690,6 +1019,815 @@ export class KeyMagicImeController {
       return this.finishPhysicalKeyEvent(event, `${processed}`, directTransactionRan ? 'failure' : 'not-run', processed,
         priorHandledKey !== undefined, repeatDown, repeatCount);
     }
+  }
+
+  /**
+   * Accepts a logical key sent by the fixed POC panel. The panel has no
+   * composition or editor access: it can only supply the same KeyMagic key
+   * identity and modifier state that the physical mapper supplies.
+   */
+  /** Routes virtual presses by the controller-owned panel language mode. */
+  private handleVirtualKeyPress(press: VirtualKeyPress): void {
+    if (press.command === VirtualKeyboardCommand.BackspaceRelease) {
+      this.releaseVirtualBackspace('panel UP/CANCEL');
+      return;
+    }
+    if (press.command === VirtualKeyboardCommand.ToggleLanguage) {
+      this.toggleVirtualKeyboardLanguageMode();
+      return;
+    }
+    if (press.command === VirtualKeyboardCommand.CommitComposition) {
+      this.commitCompositionAndReset(`virtual keyboard layer switch: ${press.label}`);
+      return;
+    }
+    if (press.command === VirtualKeyboardCommand.InsertEmoji) {
+      this.insertVirtualEmoji(press.character, press.label);
+      return;
+    }
+    if (press.keyCode === KeyMagicVirtualKey.Shift) {
+      this.setVirtualShiftActive(!this.virtualShiftActive);
+      return;
+    }
+    if (press.keyCode === KeyMagicVirtualKey.Back) {
+      this.backspaceHeld = true;
+      this.handleVirtualBackspace(press.isBackspaceRepeat === true);
+      return;
+    }
+    if (getVirtualKeyboardLanguageMode() === KeyboardLanguageMode.English) {
+      this.handleVirtualEnglishKeyPress(press);
+      return;
+    }
+
+    if (this.inputClient === undefined) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `Ignoring virtual Burmese key ${press.label}: no active input session.`);
+      return;
+    }
+
+    const shift = press.ignoreVirtualShift === true ? press.forceShift === true :
+      this.virtualShiftActive || press.forceShift === true;
+    const character = shift && press.shiftedCharacter !== undefined ?
+      press.shiftedCharacter : (press.character === undefined ? '' : press.character);
+    // A panel Shift tap represents physical Shift-down -> key -> Shift-up.
+    if (press.preserveVirtualShift !== true) {
+      this.setVirtualShiftActive(false);
+    }
+    const input = keyMagicInputFromVirtualKey(press.keyCode, character, shift);
+
+    if (this.isPrintableKeyMagicInput(input) && !this.ensureIpcKeyboardLoaded('virtual Burmese printable key')) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `Ignoring virtual Burmese key ${press.label}: IPC keyboard reload failed.`);
+      return;
+    }
+    if (!this.keyboardLoaded) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `Ignoring virtual Burmese key ${press.label}: no keyboard is loaded.`);
+      return;
+    }
+
+    try {
+      const processed = this.processKeyMagicInput(input, `Virtual Burmese keyboard (${press.label})`);
+      if (!processed) {
+        this.applyVirtualUnhandledKey(input);
+      }
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `VIRTUAL BURMESE KEY label=${press.label} key=${input.keyCode} shift=${input.shift === true} ` +
+          `processed=${processed} composition=${this.formatTextWithCodePoints(this.internalComposition)}`);
+    } catch (error) {
+      this.resetForInputSession('virtual Burmese key editor operation failure');
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `Virtual Burmese KeyMagic handling failed: ${JSON.stringify(error)}`);
+    }
+  }
+
+  /**
+   * Inserts immediately through the compatibility bridge.  Unlike deletion,
+   * this synchronous API was proven to deliver text in Android-container
+   * editors.  Never expose the inserted content in logs.
+   */
+  private insertEditorTextSync(
+    inputClient: inputMethodEngine.InputClient,
+    text: string,
+    operation: string,
+  ): void {
+    const startedAt = Date.now();
+    const textLength = text.length;
+    const codePointCount = this.compositionPopupCodePointCount(text);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `EDITOR INSERT SYNC begin type=${operation} textLength=${textLength} ` +
+        `codePointCount=${codePointCount}`);
+    try {
+      inputClient.insertTextSync(text);
+      const durationMs = Date.now() - startedAt;
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `EDITOR INSERT SYNC complete type=${operation} result=success durationMs=${durationMs} ` +
+          `textLength=${textLength} codePointCount=${codePointCount}`);
+      if (durationMs > 500) {
+        hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `EDITOR INSERT SYNC major-warning type=${operation} durationMs=${durationMs} thresholdMs=500`);
+      } else if (durationMs > 100) {
+        hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `EDITOR INSERT SYNC slow-warning type=${operation} durationMs=${durationMs} thresholdMs=100`);
+      }
+    } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `EDITOR INSERT SYNC complete type=${operation} result=error durationMs=${durationMs} ` +
+          `textLength=${textLength} codePointCount=${codePointCount} ` +
+          `error=${this.describeRuntimeError(error)}`);
+      throw new Error(this.describeRuntimeError(error));
+    }
+  }
+
+  /** Adds printable virtual-English text without entering the editor from touch handling. */
+  private enqueueDeferredEnglishInsert(
+    inputClient: inputMethodEngine.InputClient,
+    text: string,
+    operation: string,
+  ): void {
+    const item: DeferredEnglishInsert = {
+      id: this.nextDeferredInsertId++,
+      session: this.editorTransportSession,
+      client: inputClient,
+      text,
+      operation,
+      enqueuedAt: Date.now(),
+    };
+    this.deferredEnglishInsertQueue.push(item);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `DEFERRED INSERT queued id=${item.id} textLength=${text.length} ` +
+        `codePointCount=${this.compositionPopupCodePointCount(text)} queueDepth=${this.deferredEnglishInsertQueue.length} operation=${operation}`);
+    this.scheduleDeferredEnglishInsertDrain();
+  }
+
+  /** Schedules at most one FIFO item; Promise settlement never controls drain progress. */
+  private scheduleDeferredEnglishInsertDrain(): void {
+    if (this.deferredEnglishDrainScheduled || this.deferredEnglishInsertQueue.length === 0) {
+      return;
+    }
+    const scheduledSession = this.editorTransportSession;
+    this.deferredEnglishDrainScheduled = true;
+    setTimeout((): void => {
+      if (scheduledSession !== this.editorTransportSession) {
+        return;
+      }
+      this.deferredEnglishDrainScheduled = false;
+      let item: DeferredEnglishInsert | undefined;
+      while (this.deferredEnglishInsertQueue.length > 0 && item === undefined) {
+        const candidate = this.deferredEnglishInsertQueue.shift();
+        if (candidate === undefined) {
+          continue;
+        }
+        if (candidate.session !== this.editorTransportSession || this.inputClient !== candidate.client) {
+          hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+            `DEFERRED INSERT reject id=${candidate.id} session=${candidate.session} result=stale-session currentSession=${this.editorTransportSession}`);
+          continue;
+        }
+        item = candidate;
+      }
+      if (item !== undefined) {
+        this.executeDeferredEnglishInsert(item);
+      }
+      // This is deliberately independent of insertText() resolve/reject.
+      this.scheduleDeferredEnglishInsertDrain();
+    }, 0);
+  }
+
+  /** Invokes one async insertion after a completed touch event. */
+  private executeDeferredEnglishInsert(item: DeferredEnglishInsert): void {
+    this.deferredInsertId = item.id;
+    this.deferredInsertSession = item.session;
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `DEFERRED INSERT execute id=${item.id} session=${item.session}`);
+    if (item.session !== this.editorTransportSession || this.inputClient !== item.client) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `DEFERRED INSERT reject id=${item.id} session=${item.session} result=stale-session currentSession=${this.editorTransportSession}`);
+      return;
+    }
+    try {
+      item.client.insertText(item.text).then((): void => {
+        hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `DEFERRED INSERT resolve id=${item.id} session=${item.session}`);
+      }).catch((error: Object): void => {
+        hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `DEFERRED INSERT reject id=${item.id} session=${item.session} error=${this.describeRuntimeError(error)}`);
+      });
+    } catch (error) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `DEFERRED INSERT reject id=${item.id} session=${item.session} phase=call error=${this.describeRuntimeError(error)}`);
+    }
+  }
+
+  /** Clears queued virtual-English text without cancelling any in-flight IPC. */
+  private clearDeferredEnglishInsertQueue(reason: string): void {
+    const discardedCount = this.deferredEnglishInsertQueue.length;
+    this.deferredEnglishInsertQueue = [];
+    this.deferredEnglishDrainScheduled = false;
+    this.deferredInsertId = undefined;
+    this.deferredInsertSession = this.editorTransportSession;
+    if (discardedCount > 0) {
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `DEFERRED INSERT cleared reason=${reason} session=${this.editorTransportSession} discarded=${discardedCount}`);
+    }
+  }
+
+  /** Queues one committed-text Backspace without entering ANCO from the touch/repeat callback. */
+  private enqueueDeferredBackspaceDelete(
+    inputClient: inputMethodEngine.InputClient,
+    isRepeat: boolean,
+    operation: string,
+  ): void {
+    const item: DeferredBackspaceDelete = {
+      id: this.nextDeferredBackspaceDeleteId++,
+      session: this.editorTransportSession,
+      client: inputClient,
+      isRepeat,
+      operation,
+      enqueuedAt: Date.now(),
+    };
+    this.deferredBackspaceDeleteQueue.push(item);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `DEFERRED BACKSPACE queued id=${item.id} session=${item.session} repeat=${isRepeat} ` +
+        `queueDepth=${this.deferredBackspaceDeleteQueue.length}`);
+    this.scheduleDeferredBackspaceDeleteDrain();
+  }
+
+  /** Runs at most one queued Backspace per event-loop turn; delete Promise settlement never controls pacing. */
+  private scheduleDeferredBackspaceDeleteDrain(): void {
+    if (this.deferredBackspaceDrainScheduled || this.deferredBackspaceDeleteQueue.length === 0) {
+      return;
+    }
+    const scheduledSession = this.editorTransportSession;
+    this.deferredBackspaceDrainScheduled = true;
+    setTimeout((): void => {
+      this.deferredBackspaceDrainScheduled = false;
+      if (scheduledSession !== this.editorTransportSession) {
+        return;
+      }
+
+      let item: DeferredBackspaceDelete | undefined;
+      while (this.deferredBackspaceDeleteQueue.length > 0 && item === undefined) {
+        const candidate = this.deferredBackspaceDeleteQueue.shift();
+        if (candidate === undefined) {
+          continue;
+        }
+        if (candidate.session !== this.editorTransportSession || this.inputClient !== candidate.client) {
+          hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+            `DEFERRED BACKSPACE reject id=${candidate.id} session=${candidate.session} ` +
+              `result=stale-session currentSession=${this.editorTransportSession}`);
+          continue;
+        }
+        if (candidate.isRepeat && !this.backspaceHeld) {
+          hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+            `DEFERRED BACKSPACE discard id=${candidate.id} reason=repeat-after-release`);
+          continue;
+        }
+        item = candidate;
+      }
+
+      if (item !== undefined) {
+        this.executeDeferredBackspaceDelete(item);
+      }
+      // Exactly like deferred English insertion: the next queued operation gets
+      // another event-loop turn, independent of Promise resolve/reject.
+      this.scheduleDeferredBackspaceDeleteDrain();
+    }, 0);
+  }
+
+  /** Invokes public async deleteForward() after the originating touch/repeat callback has returned. */
+  private executeDeferredBackspaceDelete(item: DeferredBackspaceDelete): void {
+    if (item.session !== this.editorTransportSession || this.inputClient !== item.client) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `DEFERRED BACKSPACE reject id=${item.id} session=${item.session} ` +
+          `result=stale-session currentSession=${this.editorTransportSession}`);
+      return;
+    }
+    const startedAt = Date.now();
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `BACKSPACE DELETE begin id=${item.id} session=${item.session} deferred=true repeat=${item.isRepeat}`);
+    try {
+      item.client.deleteForward(1).then((result: boolean): void => {
+        hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `BACKSPACE DELETE resolve id=${item.id} session=${item.session} deferred=true result=${result} ` +
+            `durationMs=${Date.now() - startedAt}`);
+      }).catch((error: Object): void => {
+        hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `BACKSPACE DELETE reject id=${item.id} session=${item.session} deferred=true ` +
+            `durationMs=${Date.now() - startedAt} error=${this.describeRuntimeError(error)}`);
+      });
+    } catch (error) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `BACKSPACE DELETE reject id=${item.id} session=${item.session} deferred=true phase=call ` +
+          `durationMs=${Date.now() - startedAt} error=${this.describeRuntimeError(error)}`);
+    }
+  }
+
+  /** Drops queued Backspace work on editor/session teardown; in-flight IPC is never cancelled. */
+  private clearDeferredBackspaceDeleteQueue(reason: string): void {
+    const discardedCount = this.deferredBackspaceDeleteQueue.length;
+    this.deferredBackspaceDeleteQueue = [];
+    this.deferredBackspaceDrainScheduled = false;
+    if (discardedCount > 0) {
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `DEFERRED BACKSPACE cleared reason=${reason} session=${this.editorTransportSession} ` +
+          `discarded=${discardedCount}`);
+    }
+  }
+
+  /** Emoji is ordinary editor text, never KeyMagic input or Burmese preedit. */
+  private insertVirtualEmoji(emoji: string | undefined, label: string): void {
+    if (emoji === undefined || emoji.length === 0) {
+      return;
+    }
+    if (this.internalComposition.length > 0) {
+      this.commitCompositionAndReset('virtual emoji selection boundary');
+    }
+    const inputClient = this.inputClient;
+    if (inputClient === undefined) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `Ignoring virtual emoji label=${label}: no active input session.`);
+      return;
+    }
+    try {
+      this.enqueueDeferredEnglishInsert(inputClient, emoji, 'virtual emoji');
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `VIRTUAL EMOJI insert result=success label=${label} codePointCount=${this.compositionPopupCodePointCount(emoji)}`);
+    } catch (error) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `VIRTUAL EMOJI insert result=error label=${label} error=${this.describeRuntimeError(error)}`);
+    }
+  }
+
+  /** Queues a non-composing KeyMagic delete without inspecting editor text. */
+  private enqueueEditorDeleteBackward(
+    inputClient: inputMethodEngine.InputClient,
+    length: number,
+    operation: string,
+  ): void {
+    this.enqueueEditorOperation(inputClient, 'DELETE_BACKWARD', length, operation);
+  }
+
+  /**
+   * Preserve Enter's established direct sendKeyFunction path.  It is neither
+   * text insertion nor committed-text deletion, so it must not inherit either
+   * transport policy.
+   */
+  private sendEditorEnter(inputClient: inputMethodEngine.InputClient, operation: string): void {
+    const startedAt = Date.now();
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `EDITOR ENTER begin type=${operation} enterKeyType=${this.editorEnterKeyType}`);
+    try {
+      inputClient.sendKeyFunction(this.editorEnterKeyType).then((result: boolean): void => {
+        hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `EDITOR ENTER complete type=${operation} result=${result} durationMs=${Date.now() - startedAt}`);
+      }).catch((error: Object): void => {
+        hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `EDITOR ENTER complete type=${operation} result=error durationMs=${Date.now() - startedAt} ` +
+            `error=${this.describeRuntimeError(error)}`);
+      });
+    } catch (error) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `EDITOR ENTER complete type=${operation} result=error durationMs=${Date.now() - startedAt} ` +
+          `error=${this.describeRuntimeError(error)}`);
+    }
+  }
+
+  /** Starts a new focused-editor session without cancelling a request already in IPC. */
+  private beginEditorTransportSession(reason: string): void {
+    const discardedCount = this.editorOperationQueue.length;
+    const staleBackspaceOperation = this.editorOperationInFlight !== undefined &&
+      this.editorOperationInFlight.type === 'DELETE_LEFT' ? this.editorOperationInFlight : undefined;
+    this.editorTransportSession++;
+    this.editorOperationQueue = [];
+    // A never-settling delete from the prior editor must not permanently hold
+    // the Backspace one-in-flight gate for this newly bound InputClient.
+    if (staleBackspaceOperation !== undefined) {
+      this.editorOperationInFlight = undefined;
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `BACKSPACE DELETE reset staleId=${staleBackspaceOperation.id} priorSession=${staleBackspaceOperation.session} ` +
+          `currentSession=${this.editorTransportSession}`);
+    }
+    this.clearDeferredBackspaceDeleteQueue(reason);
+    this.clearDeferredEnglishInsertQueue(reason);
+    this.backspaceHeld = false;
+    this.coalescedBackspaceRepeatRequested = false;
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `EDITOR OP session begin reason=${reason} session=${this.editorTransportSession} ` +
+        `discardedQueued=${discardedCount} inFlight=${this.editorOperationInFlight === undefined ? 'none' : this.editorOperationInFlight.id}`);
+  }
+
+  /** A release stops future hold-repeat deletes but preserves a queued initial tap. */
+  private releaseVirtualBackspace(reason: string): void {
+    const hadPendingRepeat = this.coalescedBackspaceRepeatRequested;
+    const before = this.deferredBackspaceDeleteQueue.length;
+    this.backspaceHeld = false;
+    this.coalescedBackspaceRepeatRequested = false;
+    this.deferredBackspaceDeleteQueue = this.deferredBackspaceDeleteQueue.filter(
+      (item: DeferredBackspaceDelete): boolean => !item.isRepeat,
+    );
+    const clearedDeferredRepeats = before - this.deferredBackspaceDeleteQueue.length;
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `EDITOR OP backspace release reason=${reason} clearedCoalesced=${hadPendingRepeat} ` +
+        `clearedDeferredRepeats=${clearedDeferredRepeats}`);
+  }
+
+  /** Queues only asynchronous editor deletions, with one IPC in flight. */
+  private enqueueEditorOperation(
+    client: inputMethodEngine.InputClient,
+    type: EditorOperationType,
+    length: number | undefined,
+    reason: string,
+  ): void {
+    const session = this.editorTransportSession;
+    const operation: QueuedEditorOperation = {
+      id: this.nextEditorOperationId++,
+      session,
+      client,
+      type,
+      length,
+      reason,
+      enqueuedAt: Date.now(),
+      startedAt: undefined,
+    };
+    this.editorOperationQueue.push(operation);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `EDITOR OP enqueue type=${type} id=${operation.id} queueDepth=${this.editorOperationQueue.length} ` +
+        `length=${length === undefined ? 0 : length} reason=${reason}`);
+    this.drainEditorOperationQueue();
+  }
+
+  /** Starts the next Promise-based InputClient mutation and immediately returns to ArkUI. */
+  private drainEditorOperationQueue(): void {
+    if (this.editorOperationInFlight !== undefined) {
+      return;
+    }
+    let operation: QueuedEditorOperation | undefined;
+    while (this.editorOperationQueue.length > 0 && operation === undefined) {
+      const candidate = this.editorOperationQueue.shift();
+      if (candidate === undefined) {
+        continue;
+      }
+      if (candidate.session !== this.editorTransportSession) {
+        hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `EDITOR OP discarded type=${candidate.type} id=${candidate.id} staleSession=${candidate.session} ` +
+            `currentSession=${this.editorTransportSession}`);
+        continue;
+      }
+      operation = candidate;
+    }
+    if (operation === undefined) {
+      return;
+    }
+
+    this.editorOperationInFlight = operation;
+    operation.startedAt = Date.now();
+    if (operation.type === 'DELETE_LEFT') {
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `BACKSPACE DELETE begin id=${operation.id} session=${operation.session} length=${operation.length === undefined ? 1 : operation.length}`);
+    }
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `EDITOR OP begin type=${operation.type} id=${operation.id} queueDepth=${this.editorOperationQueue.length} ` +
+        `length=${operation.length === undefined ? 0 : operation.length} reason=${operation.reason}`);
+    this.scheduleEditorOperationLatencyLogs(operation);
+    if (operation.type === 'DELETE_LEFT') {
+      this.scheduleBackspaceDeleteWatchdog(operation);
+    }
+
+    let request: Promise<boolean>;
+    try {
+      switch (operation.type) {
+        case 'DELETE_LEFT':
+          // Device validation established that this public API's direction is
+          // cursor-left in this IME context, which is the Backspace behavior.
+          request = operation.client.deleteForward(operation.length === undefined ? 1 : operation.length);
+          break;
+        case 'DELETE_BACKWARD':
+          request = operation.client.deleteBackward(operation.length === undefined ? 0 : operation.length);
+          break;
+        default:
+          throw new Error(`Unsupported editor operation type ${operation.type}.`);
+      }
+    } catch (error) {
+      this.completeEditorOperation(operation, false, undefined, error);
+      return;
+    }
+    request.then((result: boolean): void => {
+      this.completeEditorOperation(operation as QueuedEditorOperation, result, result, undefined);
+    }).catch((error: Object): void => {
+      this.completeEditorOperation(operation as QueuedEditorOperation, false, undefined, error);
+    });
+  }
+
+  /** Releases only a hung Backspace gate; it never retries an editor mutation. */
+  private scheduleBackspaceDeleteWatchdog(operation: QueuedEditorOperation): void {
+    setTimeout((): void => {
+      if (this.editorOperationInFlight === undefined || this.editorOperationInFlight.id !== operation.id) {
+        return;
+      }
+      this.editorOperationInFlight = undefined;
+      this.coalescedBackspaceRepeatRequested = false;
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `BACKSPACE DELETE watchdog timeout id=${operation.id} session=${operation.session} ` +
+          `durationMs=${Date.now() - (operation.startedAt === undefined ? operation.enqueuedAt : operation.startedAt)}`);
+    }, BACKSPACE_DELETE_WATCHDOG_MS);
+  }
+
+  /** Emits non-blocking latency warnings at the requested compatibility thresholds. */
+  private scheduleEditorOperationLatencyLogs(operation: QueuedEditorOperation): void {
+    [100, 500, 1000].forEach((thresholdMs: number): void => {
+      setTimeout((): void => {
+        if (this.editorOperationInFlight === undefined || this.editorOperationInFlight.id !== operation.id) {
+          return;
+        }
+        const durationMs = Date.now() - (operation.startedAt === undefined ? operation.enqueuedAt : operation.startedAt);
+        const level = thresholdMs >= 1000 ? 'timeout-warning' : 'slow-warning';
+        hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `EDITOR OP ${level} type=${operation.type} id=${operation.id} durationMs=${durationMs} ` +
+            `thresholdMs=${thresholdMs} result=pending`);
+      }, thresholdMs);
+    });
+  }
+
+  /** Completes one request, conditionally emits one coalesced hold-delete, then advances the queue. */
+  private completeEditorOperation(
+    operation: QueuedEditorOperation,
+    succeeded: boolean,
+    result: boolean | undefined,
+    error: Object | undefined,
+  ): void {
+    if (this.editorOperationInFlight === undefined || this.editorOperationInFlight.id !== operation.id) {
+      if (operation.type === 'DELETE_LEFT') {
+        hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `BACKSPACE DELETE late completion ignored id=${operation.id} session=${operation.session}`);
+      }
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `EDITOR OP completion ignored type=${operation.type} id=${operation.id} reason=not-current-in-flight`);
+      return;
+    }
+    this.editorOperationInFlight = undefined;
+    const durationMs = Date.now() - (operation.startedAt === undefined ? operation.enqueuedAt : operation.startedAt);
+    const resultLabel = succeeded ? `success result=${result === undefined ? '<none>' : result}` :
+      `failed error=${error === undefined ? '<none>' : this.describeRuntimeError(error)}`;
+    if (operation.type === 'DELETE_LEFT') {
+      const outcome = succeeded ? 'resolve' : 'reject';
+      const detail = succeeded ? `result=${result === undefined ? '<none>' : result}` :
+        `error=${error === undefined ? '<none>' : this.describeRuntimeError(error)}`;
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `BACKSPACE DELETE ${outcome} id=${operation.id} session=${operation.session} ${detail}`);
+    }
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `EDITOR OP complete type=${operation.type} id=${operation.id} durationMs=${durationMs} ` +
+        `queueDepth=${this.editorOperationQueue.length} ${resultLabel}`);
+    if (durationMs > 1000) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `EDITOR OP timeout-warning type=${operation.type} id=${operation.id} durationMs=${durationMs} result=${succeeded ? 'completed-late' : 'failed-late'}`);
+    } else if (durationMs > 500) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `EDITOR OP slow-warning type=${operation.type} id=${operation.id} durationMs=${durationMs} thresholdMs=500`);
+    } else if (durationMs > 100) {
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `EDITOR OP slow-warning type=${operation.type} id=${operation.id} durationMs=${durationMs} thresholdMs=100`);
+    }
+
+    if (operation.type === 'DELETE_LEFT' && operation.session === this.editorTransportSession &&
+      this.coalescedBackspaceRepeatRequested && this.backspaceHeld) {
+      this.coalescedBackspaceRepeatRequested = false;
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `EDITOR OP dequeue-coalesced type=DELETE id=${operation.id} reason=backspace-still-held`);
+      this.enqueueEditorOperation(operation.client, 'DELETE_LEFT', 1, 'coalesced Backspace hold repeat');
+    }
+    this.drainEditorOperationQueue();
+  }
+
+  /** Inserts ordinary Latin text; this path deliberately never calls KeyMagic. */
+  private handleVirtualEnglishKeyPress(press: VirtualKeyPress): void {
+    const inputClient = this.inputClient;
+    if (inputClient === undefined) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `Ignoring virtual English key ${press.label}: no active input session.`);
+      return;
+    }
+    // A physical KeyMagic composition can only remain here if the user used a
+    // hardware key while the panel was in EN. Commit it once before plain text.
+    if (this.internalComposition.length > 0) {
+      this.commitCompositionAndReset('English virtual key clears stale KeyMagic composition');
+    }
+
+    const shift = this.virtualShiftActive || press.forceShift === true;
+    const character = shift ?
+      (press.englishShiftedCharacter === undefined ?
+        (press.shiftedCharacter === undefined ? (press.character === undefined ? '' : press.character) : press.shiftedCharacter) :
+        press.englishShiftedCharacter) :
+      (press.character === undefined ? '' : press.character);
+    this.setVirtualShiftActive(false);
+
+    try {
+      switch (press.keyCode) {
+
+        case KeyMagicVirtualKey.Return:
+          this.sendEditorEnter(inputClient, 'virtual English Enter');
+          break;
+        case KeyMagicVirtualKey.Space:
+          this.enqueueDeferredEnglishInsert(inputClient, ' ', 'virtual English Space');
+          break;
+        default:
+          if (character.length > 0) {
+            this.enqueueDeferredEnglishInsert(inputClient, character, 'virtual English character');
+          }
+          break;
+      }
+      // EN owns no KeyMagic composition and never publishes a composition popup.
+      this.internalComposition = '';
+      this.publishCompositionPopup();
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `VIRTUAL ENGLISH KEY label=${press.label} key=${press.keyCode} shift=${shift} textLength=${character.length}`);
+    } catch (error) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `Virtual English key handling failed: ${JSON.stringify(error)}`);
+    }
+  }
+  /** Uses KeyMagic for active Burmese composition; committed deletes are queued asynchronously. */
+  private handleVirtualBackspace(isRepeat: boolean = false): void {
+    const inputClient = this.inputClient;
+    const compositionActive = this.internalComposition.length > 0;
+    const mode = getVirtualKeyboardLanguageMode();
+    this.setVirtualShiftActive(false);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      'VIRTUAL BACKSPACE begin mode=' + mode + ' compositionActive=' + compositionActive +
+        ' keyboardLoaded=' + this.keyboardLoaded + ' clientBound=' + (inputClient !== undefined) +
+        ' repeat=' + isRepeat);
+    if (inputClient === undefined) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        'VIRTUAL BACKSPACE skipped mode=' + mode + ': no active input client.');
+      return;
+    }
+
+    if (mode === KeyboardLanguageMode.Burmese && compositionActive) {
+      if (!this.keyboardLoaded || !this.native.isCreated()) {
+        hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          'VIRTUAL BACKSPACE path=KeyMagic composition skipped: native keyboard is unavailable.');
+        return;
+      }
+      try {
+        const input = keyMagicInputFromVirtualKey(KeyMagicVirtualKey.Back);
+        const processed = this.processKeyMagicInput(input, 'Virtual Burmese Backspace');
+        hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          'VIRTUAL BACKSPACE path=KeyMagic processed=' + processed +
+            ' compositionActiveAfter=' + (this.internalComposition.length > 0));
+      } catch (error) {
+        hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          'VIRTUAL BACKSPACE path=KeyMagic failure: ' + this.describeRuntimeError(error));
+      }
+      return;
+    }
+
+    if (mode === KeyboardLanguageMode.English && compositionActive) {
+      this.commitCompositionAndReset('English virtual Backspace clears stale KeyMagic composition');
+    }
+    this.deleteCommittedTextOnce(mode, isRepeat);
+  }
+
+  /**
+   * A panel tap has no physical event to return to HarmonyOS. Use the public,
+   * editor-local InputClient operation instead of the test-only global event
+   * injector. The active editor owns selection replacement and cursor motion.
+   */
+  private deleteCommittedTextOnce(mode: KeyboardLanguageMode, isRepeat: boolean): void {
+    const inputClient = this.inputClient;
+    if (inputClient === undefined) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        'VIRTUAL BACKSPACE editor path=InputClient.deleteForward skipped mode=' + mode + ': no input client.');
+      return;
+    }
+
+    // ANCO-safe committed Backspace transport: never enter InputClient from the
+    // ArkUI/MMI touch/repeat callback and never let a stuck Promise throttle the
+    // 65ms hold-repeat cadence. Burmese active-composition Backspace never reaches
+    // this method; it remains entirely inside KeyMagic.
+    this.enqueueDeferredBackspaceDelete(
+      inputClient,
+      isRepeat,
+      isRepeat ? 'virtual Backspace hold repeat' : 'virtual Backspace DOWN',
+    );
+  }
+  /**
+   * Physical unhandled keys are returned to HarmonyOS for its normal editor
+   * behavior. A panel tap has no hardware event to return, so reproduce only
+   * the three non-Burmese control-key fallbacks in the same place, after
+   * KeyMagic has declined the key and the shared path has committed/reset.
+   */
+  private applyVirtualUnhandledKey(input: KeyMagicKeyInput): void {
+    const inputClient = this.inputClient;
+    if (inputClient === undefined) {
+      return;
+    }
+    switch (input.keyCode) {
+      case KeyMagicVirtualKey.Space:
+        this.enqueueDeferredEnglishInsert(inputClient, ' ', 'virtual Burmese unhandled Space');
+        return;
+      case KeyMagicVirtualKey.Back:
+        this.handleVirtualBackspace();
+        return;
+      case KeyMagicVirtualKey.Return:
+        this.sendEditorEnter(inputClient, 'virtual Burmese unhandled Enter');
+        return;
+      default:
+      // A software-key tap has no raw hardware event to return to HarmonyOS.
+      // Do not insert a normal key directly here: Burmese-producing keys must
+      // enter the editor only through KeyMagic's existing composition path.
+        hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          'Virtual key was not handled by KeyMagic; no direct text inserted.');
+        return;
+    }
+  }
+
+  /**
+   * The sole KeyMagic processing path shared by physical and virtual keys.
+   * It intentionally begins only after each source has supplied a validated
+   * KeyMagicKeyInput, and it owns the existing engine, composition, and editor
+   * transition unchanged.
+   */
+  private processKeyMagicInput(
+    input: KeyMagicKeyInput,
+    source: string,
+    rawKeyCode: number | undefined = undefined,
+    onNativeProcessed: ((processed: boolean) => void) | undefined = undefined,
+  ): boolean {
+    const inputClient = this.inputClient;
+    if (inputClient === undefined) {
+      throw new Error('Cannot process a KeyMagic key without an active input client.');
+    }
+
+    const compositionBefore = this.internalComposition;
+    const output = this.native.processKey(input, source);
+    if (onNativeProcessed !== undefined) {
+      onNativeProcessed(output.isProcessed);
+    }
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `PROCESS KEY source=${source} keyboardId=${this.loadedKeyboardId === undefined ? '<none>' : this.loadedKeyboardId} ` +
+        `generation=${this.loadedKeyboardGeneration} ` +
+        `engineId=${output.engineId} runtimeKeyboardId=${output.runtimeKeyboardId} ` +
+        `rawKeyCode=${rawKeyCode === undefined ? '<virtual>' : rawKeyCode} key=${input.keyCode} ` +
+        `shift=${input.shift === true} compositionBefore=${this.formatTextWithCodePoints(compositionBefore)} ` +
+        `outputText=${this.formatTextWithCodePoints(output.text)} ` +
+        `outputComposition=${this.formatTextWithCodePoints(output.composingText)} ` +
+        `outputCodepoints=${this.formatTextWithCodePoints(output.text.length > 0 ? output.text : output.composingText)}`);
+    this.recordEngineOutput(input, output);
+
+    if (!output.isProcessed) {
+      this.commitCompositionAndReset(`${source}: unhandled KeyMagic key`);
+      return false;
+    }
+
+    this.applyEngineOutput(inputClient, output, rawKeyCode === undefined ? 0 : rawKeyCode);
+    if (this.shouldCommitProcessedComposition(input.keyCode, output)) {
+      this.commitCompositionAndReset(`${source}: processed composition boundary`);
+    }
+    return true;
+  }
+
+  private toggleVirtualKeyboardLanguageMode(): void {
+    const nextMode = getVirtualKeyboardLanguageMode() === KeyboardLanguageMode.Burmese ?
+      KeyboardLanguageMode.English : KeyboardLanguageMode.Burmese;
+    this.setKeyboardLanguageMode(nextMode);
+  }
+
+  private setKeyboardLanguageMode(nextMode: KeyboardLanguageMode): void {
+    const previousMode = getVirtualKeyboardLanguageMode();
+    if (nextMode === previousMode) {
+      return;
+    }
+    if (previousMode === KeyboardLanguageMode.Burmese) {
+      // Preserve the existing engine contract: finalise the one authoritative
+      // KeyMagic composition before plain EN text can enter the editor.
+      this.commitCompositionAndReset('virtual language switch Burmese -> English');
+    } else {
+      this.cancelCompositionAndReset('virtual language switch English -> Burmese');
+    }
+
+    setVirtualKeyboardLanguageMode(nextMode);
+    this.keyboardSwitchFeedback = '';
+    this.setVirtualShiftActive(false);
+    if (this.keyboardLoaded && this.native.isCreated()) {
+      try {
+        this.native.resetEngine();
+      } catch (error) {
+        hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          'Unable to reset KeyMagic for virtual language switch: ' + JSON.stringify(error));
+      }
+    }
+    this.publishCompositionPopup();
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      'VIRTUAL LANGUAGE MODE ' + previousMode + ' -> ' + nextMode);
+  }
+  private setVirtualShiftActive(active: boolean): void {
+    this.virtualShiftActive = active;
+    AppStorage.setOrCreate(VIRTUAL_SHIFT_ACTIVE, active ? 'true' : 'false');
+  }
+
+  /** Panel-presence state for page-local overlays; it does not alter panel behavior. */
+  private setKeyboardPanelVisible(visible: boolean): void {
+    AppStorage.setOrCreate(KEYBOARD_PANEL_VISIBLE, visible ? 'true' : 'false');
   }
 
   private isModifierOnlyPhysicalKey(rawKeyCode: number): boolean {
@@ -776,12 +1914,12 @@ export class KeyMagicImeController {
     }
   }
 
-  /** Shared MyanKey command used by Ctrl+Shift+Z; no Harmony subtype participates. */
+  /** Shared mmKB command used by Ctrl+Shift+Z; no Harmony subtype participates. */
   private cycleKeyboard(): boolean {
     if (this.imeContext === undefined) {
       return false;
     }
-    this.commitCompositionAndReset('MyanKey Ctrl+Shift+Z keyboard cycle');
+    this.commitCompositionAndReset('mmKB Ctrl+Shift+Z keyboard cycle');
     void this.cycleKeyboardThroughIpc();
     return true;
   }
@@ -798,13 +1936,13 @@ export class KeyMagicImeController {
         `KEYBOARD IPC SET requestedId=${nextKeyboardId} returnedId=${selection.activeKeyboardId} ` +
           `returnedGeneration=${selection.keyboardGeneration} success=true reason=Ctrl+Shift+Z ` +
           `previousId=${current.activeKeyboardId}`);
-      if (!this.ensureIpcKeyboardLoaded('MyanKey Ctrl+Shift+Z keyboard cycle')) {
+      if (!this.ensureIpcKeyboardLoaded('mmKB Ctrl+Shift+Z keyboard cycle')) {
         return;
       }
       this.showKeyboardSwitchFeedback(nextKeyboard.name);
     } catch (error) {
       hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
-        `MyanKey Ctrl+Shift+Z keyboard cycle failed: ${JSON.stringify(error)}`);
+        `mmKB Ctrl+Shift+Z keyboard cycle failed: ${JSON.stringify(error)}`);
     }
   }
 
@@ -880,9 +2018,9 @@ export class KeyMagicImeController {
     const action = event.action === Action.DOWN ? 'DOWN' : event.action === Action.UP ? 'UP' : 'CANCEL';
     hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
       `COMPOSITION BOUNDARY CHECK: rawKeyCode=${event.key.code} key=${keyCode} action=${action} ` +
-      `modifierOnly=${modifierOnly} processed=${processed} ` +
-      `compositionBefore=${this.formatTextWithCodePoints(this.internalComposition)} ` +
-      `decision=${decision} reason=${reason}`);
+        `modifierOnly=${modifierOnly} processed=${processed} ` +
+        `compositionBefore=${this.formatTextWithCodePoints(this.internalComposition)} ` +
+        `decision=${decision} reason=${reason}`);
   }
 
   private applyEngineOutput(
@@ -950,20 +2088,20 @@ export class KeyMagicImeController {
         return;
       case KeyMagicActionType.Insert:
         if (output.text.length > 0) {
-          inputClient.insertTextSync(output.text);
+          this.enqueueDeferredEnglishInsert(inputClient, output.text, 'non-composing KeyMagic insert');
         }
         return;
       case KeyMagicActionType.BackspaceDelete:
         if (output.deleteCount > 0) {
-          inputClient.deleteBackwardSync(output.deleteCount);
+          this.enqueueEditorDeleteBackward(inputClient, output.deleteCount, 'non-composing KeyMagic delete');
         }
         return;
       case KeyMagicActionType.BackspaceDeleteAndInsert:
         if (output.deleteCount > 0) {
-          inputClient.deleteBackwardSync(output.deleteCount);
+          this.enqueueEditorDeleteBackward(inputClient, output.deleteCount, 'non-composing KeyMagic delete-and-insert');
         }
         if (output.text.length > 0) {
-          inputClient.insertTextSync(output.text);
+          this.insertEditorTextSync(inputClient, output.text, 'non-composing KeyMagic delete-and-insert');
         }
         return;
       default:
@@ -983,19 +2121,19 @@ export class KeyMagicImeController {
     const before = this.captureDirectEditorSnapshot(inputClient);
     this.diagnosticDirectTrace =
       `DIRECT FALLBACK BEFORE:\n` +
-      `editor=${this.diagnosticEditorIdentity}\n` +
-      `last-reported-selection=${before.selection}; cursor=${this.describeCursor(before.cursor)}\n` +
-      `text-before-cursor=${this.describeSnapshotText(before.textBefore)}\n` +
-      `text-after-cursor=${this.describeSnapshotText(before.textAfter)}\n` +
-      `Myanmar-artifacts-before-cursor=${this.describeMyanmarArtifacts(before.textBefore)}\n` +
-      `Myanmar-artifacts-after-cursor=${this.describeMyanmarArtifacts(before.textAfter)}\n` +
-      `snapshot-read-errors=${before.readErrors}\n` +
-      `ENGINE/EDITOR SYNCHRONIZATION=${this.directEngineSynchronization}\n` +
-      `ENGINE COMPOSITION BEFORE KEY=${this.describeSnapshotText(this.directEngineCompositionBeforeKey)}\n` +
-      `EngineOutput.action=${this.actionName(output.actionType)}\n` +
-      `EngineOutput.text=${this.formatTextWithCodePoints(output.text)}\n` +
-      `EngineOutput.delete_count=${output.deleteCount}\n` +
-      `EngineOutput.composition=${this.formatTextWithCodePoints(output.composingText)}`;
+        `editor=${this.diagnosticEditorIdentity}\n` +
+        `last-reported-selection=${before.selection}; cursor=${this.describeCursor(before.cursor)}\n` +
+        `text-before-cursor=${this.describeSnapshotText(before.textBefore)}\n` +
+        `text-after-cursor=${this.describeSnapshotText(before.textAfter)}\n` +
+        `Myanmar-artifacts-before-cursor=${this.describeMyanmarArtifacts(before.textBefore)}\n` +
+        `Myanmar-artifacts-after-cursor=${this.describeMyanmarArtifacts(before.textAfter)}\n` +
+        `snapshot-read-errors=${before.readErrors}\n` +
+        `ENGINE/EDITOR SYNCHRONIZATION=${this.directEngineSynchronization}\n` +
+        `ENGINE COMPOSITION BEFORE KEY=${this.describeSnapshotText(this.directEngineCompositionBeforeKey)}\n` +
+        `EngineOutput.action=${this.actionName(output.actionType)}\n` +
+        `EngineOutput.text=${this.formatTextWithCodePoints(output.text)}\n` +
+        `EngineOutput.delete_count=${output.deleteCount}\n` +
+        `EngineOutput.composition=${this.formatTextWithCodePoints(output.composingText)}`;
     this.expectedDirectSelectionChanges = [];
     this.expectedDirectTextChanges = [];
     this.publishDirectFallbackTrace('direct fallback before');
@@ -1038,7 +2176,7 @@ export class KeyMagicImeController {
         // and must not reset a live KeyMagic composition between two keys.
         this.directEngineSynchronization =
           `engine-composition=${this.formatTextWithCodePoints(engineComposition)} cursor=${cursor} ` +
-          'action=kept (cursor unavailable from editor)';
+            'action=kept (cursor unavailable from editor)';
         hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
           `DIRECT ENGINE SYNC ${this.directEngineSynchronization}`);
         return;
@@ -1048,7 +2186,7 @@ export class KeyMagicImeController {
         this.directEngineCompositionBeforeKey = '';
         this.directEngineSynchronization =
           `engine-composition=${this.formatTextWithCodePoints(engineComposition)} cursor=${cursor} ` +
-          'action=reset (no text before cursor)';
+            'action=reset (no text before cursor)';
         hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
           `DIRECT ENGINE SYNC ${this.directEngineSynchronization}`);
         return;
@@ -1059,7 +2197,7 @@ export class KeyMagicImeController {
       this.directEngineCompositionBeforeKey = '';
       this.directEngineSynchronization =
         `engine-composition=${this.formatTextWithCodePoints(engineComposition)} action=reset ` +
-        `because editor context is unavailable: ${JSON.stringify(error)}`;
+          `because editor context is unavailable: ${JSON.stringify(error)}`;
       hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `DIRECT ENGINE SYNC ${this.directEngineSynchronization}`);
       return;
@@ -1069,8 +2207,8 @@ export class KeyMagicImeController {
       (editorBefore.endsWith(engineComposition) || engineComposition.endsWith(editorBefore))) {
       this.directEngineSynchronization =
         `engine-composition=${this.formatTextWithCodePoints(engineComposition)} ` +
-        `editor-before-cursor=${this.formatTextWithCodePoints(editorBefore)} ` +
-        `cursor=${cursor} action=kept (suffix match)`;
+          `editor-before-cursor=${this.formatTextWithCodePoints(editorBefore)} ` +
+          `cursor=${cursor} action=kept (suffix match)`;
       hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `DIRECT ENGINE SYNC ${this.directEngineSynchronization}`);
       return;
@@ -1081,8 +2219,8 @@ export class KeyMagicImeController {
       this.directEngineCompositionBeforeKey = editorBefore;
       this.directEngineSynchronization =
         `engine-composition=${this.formatTextWithCodePoints(engineComposition)} ` +
-        `editor-before-cursor=${this.formatTextWithCodePoints(editorBefore)} ` +
-        `cursor=${cursor} action=seeded-from-editor-context`;
+          `editor-before-cursor=${this.formatTextWithCodePoints(editorBefore)} ` +
+          `cursor=${cursor} action=seeded-from-editor-context`;
       hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `DIRECT ENGINE SYNC ${this.directEngineSynchronization}`);
     } catch (error) {
@@ -1090,7 +2228,7 @@ export class KeyMagicImeController {
       this.directEngineCompositionBeforeKey = '';
       this.directEngineSynchronization =
         `engine-composition=${this.formatTextWithCodePoints(engineComposition)} action=reset ` +
-        `because seeding editor context failed: ${JSON.stringify(error)}`;
+          `because seeding editor context failed: ${JSON.stringify(error)}`;
       hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `DIRECT ENGINE SYNC ${this.directEngineSynchronization}`);
     }
@@ -1571,10 +2709,10 @@ export class KeyMagicImeController {
     const action = event.action === Action.DOWN ? 'DOWN' : event.action === Action.UP ? 'UP' : 'CANCEL';
     hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
       `IME PHYSICAL EVENT: action=${action} rawKeyCode=${event.key.code} ` +
-      `pressedTime=${event.key.pressedTime} actionTime=${event.actionTime} ` +
-      `repeat=${repeat} repeatCount=${repeatCount} repeatSource=inferred-no-api20-repeat-field ` +
-      `processed=${processed} direct-transaction=${directTransaction} ` +
-      `returned-consumed=${consumed} matched-handled-DOWN=${matchedHandledDown}`);
+        `pressedTime=${event.key.pressedTime} actionTime=${event.actionTime} ` +
+        `repeat=${repeat} repeatCount=${repeatCount} repeatSource=inferred-no-api20-repeat-field ` +
+        `processed=${processed} direct-transaction=${directTransaction} ` +
+        `returned-consumed=${consumed} matched-handled-DOWN=${matchedHandledDown}`);
     return consumed;
   }
 
@@ -1599,8 +2737,8 @@ export class KeyMagicImeController {
     }
     this.appendDirectFallbackTrace(
       `IME HANDLED PHYSICAL DOWN: rawKeyCode=${event.key.code}; ` +
-      `action=DOWN; mappedKeyMagicCode=${input.keyCode}; ` +
-      `character=${this.formatTextWithCodePoints(character)}; returned-consumed=true; ` +
+        `action=DOWN; mappedKeyMagicCode=${input.keyCode}; ` +
+        `character=${this.formatTextWithCodePoints(character)}; returned-consumed=true; ` +
         `direct-transaction=${directTransactionStatus}; paired-UP=will-consume; ` +
         `expected-ime-text-before-cursor=${this.describeSnapshotText(snapshot.textBefore)}`,
     );
@@ -1751,30 +2889,29 @@ export class KeyMagicImeController {
   }
 
   /**
-   * Publishes the IME-owned composition to the floating panel. This observer
-   * deliberately contains no KeyMagic or InputClient document operation.
+   * Publishes IME-owned composition to the fixed virtual-keyboard panel. This
+   * observer deliberately contains no KeyMagic or InputClient document work.
    */
+  /** Publishes only Burmese KeyMagic composition; panel visibility is session-owned. */
   private publishCompositionPopup(): void {
-    const presentationText = this.popupPresentationText();
-    const visible = this.inputClient !== undefined && presentationText.length > 0;
+    const compositionEnabled = getVirtualKeyboardLanguageMode() === KeyboardLanguageMode.Burmese &&
+      this.inputClient !== undefined;
+    const presentationText = compositionEnabled ? this.popupPresentationText() : '';
     const generation = ++this.compositionPopupGeneration;
-    const composition = visible ? presentationText : '';
-    this.compositionPopupLatestComposition = composition;
+    this.compositionPopupLatestComposition = presentationText;
 
-    // Text is authoritative. Publish this exact EngineOutput composition before
-    // any panel measurement or native resize request, including the first
-    // character. Geometry may complete later, but it may never hold back UI.
-    this.publishCompositionPopupState(visible, composition, generation);
-    this.logCompositionPopupPublication(generation, composition);
+    this.publishCompositionPopupState(compositionEnabled, presentationText, generation);
+    this.logCompositionPopupPublication(generation, presentationText);
     this.logCompositionPopupRenderTrace(generation);
 
-    if (visible) {
+    if (compositionEnabled) {
       this.showCompositionPopup(generation);
     } else {
-      this.hideCompositionPopup();
+      // The fixed SOFT_KEYBOARD panel remains visible in EN; only composition
+      // presentation is disabled.
+      this.compositionPopupShown = false;
     }
   }
-
   private popupPresentationText(): string {
     return this.keyboardSwitchFeedback.length > 0 ? this.keyboardSwitchFeedback : this.internalComposition;
   }
@@ -1798,22 +2935,12 @@ export class KeyMagicImeController {
   }
 
   private showCompositionPopup(generation: number = this.compositionPopupGeneration): void {
-    if (this.panel === undefined || this.inputClient === undefined ||
-      this.compositionPopupLatestComposition.length === 0) {
-      return;
-    }
-    // Panel geometry is eventually consistent presentation work. It receives
-    // the latest composition but never publishes or replaces popup text.
-    if (!this.positionCompositionPopup()) {
+    if (this.panel === undefined || this.inputClient === undefined) {
       return;
     }
     this.logCompositionPopupRenderTrace(generation);
-    const rect = this.compositionPopupRect;
     hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
-      `POPUP SHOW generation=${generation} targetWidth=${rect === undefined ? '<unknown>' : rect.width} ` +
-        `targetHeight=${rect === undefined ? '<unknown>' : rect.height} ` +
-        `x=${rect === undefined ? '<unknown>' : rect.left} ` +
-        `y=${rect === undefined ? '<unknown>' : rect.top}`);
+      `VIRTUAL PANEL SHOW generation=${generation} composition=${this.formatTextWithCodePoints(this.compositionPopupLatestComposition)}`);
     if (!this.compositionPopupShown) {
       this.compositionPopupShown = true;
       this.showPanel();
@@ -2241,28 +3368,41 @@ export class KeyMagicImeController {
   }
 
   private commitInternalComposition(reason: string): void {
-    if (this.internalComposition.length === 0 || this.inputClient === undefined) {
+    const inputClient = this.inputClient;
+    if (this.internalComposition.length === 0 || inputClient === undefined) {
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `COMPOSITION COMMIT skipped reason=${reason} internalCompositionLength=${this.internalComposition.length} ` +
+          `clientBound=${inputClient !== undefined}`);
       return;
     }
+
     const text = this.internalComposition;
-    // Clear first: any synchronous callback is observational and cannot cause
-    // this final composition to be committed a second time.
+
+    // ANCO-safe final commit: clear the IME-owned composition immediately, then
+    // enqueue the final text onto the same ordered deferred FIFO used by virtual
+    // English. The actual InputClient.insertText() call therefore happens only
+    // after the originating ArkUI/MMI callback has returned. Promise settlement
+    // never blocks the keyboard or controls queue progress.
     this.internalComposition = '';
     this.publishCompositionPopup();
-    this.directCommitInProgress = true;
-    try {
-      this.inputClient.insertTextSync(text);
-      this.diagnosticTextSentToEditor = `committed: ${this.formatTextWithCodePoints(text)}`;
-      this.appendDirectFallbackTrace(
-        `INTERNAL COMPOSITION COMMIT: text=${this.formatTextWithCodePoints(text)}; reason=${reason}; count=1`,
-      );
-    } catch (error) {
-      this.appendDirectFallbackTrace(
-        `INTERNAL COMPOSITION COMMIT ERROR: reason=${reason}; error=${JSON.stringify(error)}`,
-      );
-    } finally {
-      this.directCommitInProgress = false;
-    }
+    this.directCommitInProgress = false;
+
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `COMPOSITION COMMIT queued reason=${reason} textLength=${text.length} count=1 ` +
+        `transport=DEFERRED_ASYNC_INSERT`);
+
+    this.enqueueDeferredEnglishInsert(
+      inputClient,
+      text,
+      `internal composition final commit: ${reason}`,
+    );
+
+    this.diagnosticTextSentToEditor =
+      `commit deferred: ${this.formatTextWithCodePoints(text)}`;
+    this.appendDirectFallbackTrace(
+      `INTERNAL COMPOSITION COMMIT QUEUED: text=${this.formatTextWithCodePoints(text)}; ` +
+        `reason=${reason}; count=1`,
+    );
   }
 
   private cancelInternalComposition(reason: string): void {
@@ -2290,7 +3430,9 @@ export class KeyMagicImeController {
     const windowId = attribute.windowId === undefined ? '<unknown>' : `${attribute.windowId}`;
     const displayId = attribute.displayId === undefined ? '<unknown>' : `${attribute.displayId}`;
     return `bundle=${bundle} ability=${ability} windowId=${windowId} displayId=${displayId} ` +
-      `inputPattern=${attribute.inputPattern} enterKeyType=${attribute.enterKeyType}`;
+      `inputPattern=${attribute.inputPattern} enterKeyType=${attribute.enterKeyType} ` +
+      `previewSupported=${attribute.isTextPreviewSupported} ` +
+      `immersiveMode=${attribute.immersiveMode === undefined ? '<unknown>' : attribute.immersiveMode}`;
   }
 
   private errorCode(error: Object): string {
@@ -2307,7 +3449,7 @@ export class KeyMagicImeController {
   }
 
   private currentTransport(): string {
-    return 'INTERNAL_COMPOSITION_POPUP';
+    return 'STRICT_INTERNAL_FINAL_COMMIT';
   }
 
   /** Records the exact NAPI result before the internal-composition update. */
@@ -2334,8 +3476,8 @@ export class KeyMagicImeController {
 
     hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
       `PHYSICAL DOWN ${keyLabel} | EngineOutput.action=${action} | ` +
-      `EngineOutput.text=${engineText} | EngineOutput.delete_count=${output.deleteCount} | ` +
-      `EngineOutput.composition=${engineComposition} | processed=${output.isProcessed}`);
+        `EngineOutput.text=${engineText} | EngineOutput.delete_count=${output.deleteCount} | ` +
+        `EngineOutput.composition=${engineComposition} | processed=${output.isProcessed}`);
   }
 
   private actionName(action: KeyMagicActionType): string {
@@ -2352,7 +3494,10 @@ export class KeyMagicImeController {
   }
 
   private formatTextWithCodePoints(text: string): string {
-    return `${text.length === 0 ? '<empty>' : text} [${this.codePoints(text)}]`;
+    // Transport diagnostics must not expose editor or composition contents.
+    // Length and code-point count are enough to compare native and container
+    // callback ordering without logging private text.
+    return `length=${text.length} codePointCount=${this.compositionPopupCodePointCount(text)}`;
   }
 
   private codePoints(text: string): string {
@@ -2403,6 +3548,246 @@ export class KeyMagicImeController {
     this.compositionPopupWindowRect = undefined;
     this.compositionPopupWindowPositionRequested = false;
     this.publishCompositionPopup();
+  }
+
+  /**
+   * The adjustment page and InputMethodExtension may run in separate
+   * processes. The public Preferences multiProcessChange observer makes an
+   * already visible FLG_FIXED panel react immediately, without restarting the
+   * editor session or altering input/composition transport.
+   */
+  private initializeKeyboardHeightPreference(context: InputMethodExtensionContext): void {
+    try {
+      this.keyboardHeightPreferences = KeyboardHeightSettings.open(context);
+      this.keyboardHeightFactor = KeyboardHeightSettings.read(context);
+      this.keyboardHeightTestOffsetPixels = KeyboardHeightSettings.readTestOffset(context);
+      this.keyboardHapticEnabled = KeyboardHeightSettings.readHapticEnabled(context);
+      this.keyboardKeyPreviewEnabled = KeyboardHeightSettings.readKeyPreviewEnabled(context);
+      this.keyboardTheme = KeyboardHeightSettings.readTheme(context);
+      this.keyboardHeightPreferences.on('multiProcessChange', this.onKeyboardHeightPreferenceChanged);
+      this.publishKeyboardVisualPreferences();
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HAPTIC setting loaded enabled=${this.keyboardHapticEnabled} source=IME-initialization`);
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel height preferences open store=${KEYBOARD_HEIGHT_PREFERENCES_STORE} ` +
+          `key=${KEYBOARD_HEIGHT_FACTOR_KEY} factor=${this.keyboardHeightFactor} ` +
+          `directTestOffsetPixels=${this.keyboardHeightTestOffsetPixels} ` +
+          `haptic=${this.keyboardHapticEnabled} keyPreview=${this.keyboardKeyPreviewEnabled} theme=${this.keyboardTheme}`);
+    } catch (error) {
+      this.keyboardHeightPreferences = undefined;
+      this.keyboardHeightFactor = KEYBOARD_HEIGHT_FACTOR_DEFAULT;
+      this.keyboardHeightTestOffsetPixels = 0;
+      this.keyboardHapticEnabled = KEYBOARD_HAPTIC_ENABLED_DEFAULT;
+      this.keyboardKeyPreviewEnabled = KEYBOARD_KEY_PREVIEW_ENABLED_DEFAULT;
+      this.keyboardTheme = KEYBOARD_THEME_DEFAULT;
+      this.publishKeyboardVisualPreferences();
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel height preference initialization failed: ${this.describeRuntimeError(error)}`);
+    }
+  }
+
+  /**
+   * Reads the system-owned visual record before/while the panel is created and
+   * observes later changes. This is the authoritative cross-process path: an
+   * ordinary app control may legitimately restart the IME, whereas local
+   * Preferences instances are process-scoped on the connected device.
+   */
+  private initializeKeyboardVisualSettingsIpc(): void {
+    if (this.keyboardVisualSettingsIpcStarted) {
+      return;
+    }
+    this.keyboardVisualSettingsIpcStarted = true;
+    void keyboardVisualSettingsIpc.startObserving((snapshot: KeyboardVisualSettingsSnapshot): void => {
+      this.applyKeyboardVisualSettingsSnapshot(snapshot, 'data-proxy');
+    }).then((): void => {
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        'HEIGHT visual IPC observer active uri=datashareproxy://com.szl.myankey/keymagic3/keyboard-visual-settings');
+    }).catch((error: Error): void => {
+      this.keyboardVisualSettingsIpcStarted = false;
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT visual IPC initialization failed error=${this.describeRuntimeError(error)}`);
+    });
+  }
+
+  /**
+   * Subscribes once for the lifetime of this InputMethodExtension process.
+   * The publisher is restricted to this bundle and publishes only visual
+   * settings, never editor content or KeyMagic state.
+   */
+  private initializeKeyboardVisualSettingsSignal(context: InputMethodExtensionContext): void {
+    if (this.keyboardVisualSettingsSubscriber !== undefined) {
+      return;
+    }
+    try {
+      const subscriber = commonEventManager.createSubscriberSync({
+        events: [KEYBOARD_VISUAL_SETTINGS_CHANGED_EVENT],
+        publisherBundleName: context.applicationInfo.name,
+      });
+      commonEventManager.subscribe(subscriber, (error: BusinessError, event: commonEventManager.CommonEventData): void => {
+        if (error !== undefined) {
+          hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+            `HEIGHT common-event receive failure: ${this.describeRuntimeError(error)}`);
+          return;
+        }
+        this.onKeyboardVisualSettingsChanged(event);
+      });
+      this.keyboardVisualSettingsSubscriber = subscriber;
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT common-event subscriber active event=${KEYBOARD_VISUAL_SETTINGS_CHANGED_EVENT}`);
+    } catch (error) {
+      this.keyboardVisualSettingsSubscriber = undefined;
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT common-event subscriber creation failed: ${this.describeRuntimeError(error)}`);
+    }
+  }
+
+  /** Publishes panel-only settings; none reaches KeyMagic or the editor. */
+  private publishKeyboardVisualPreferences(): void {
+    AppStorage.setOrCreate(KEYBOARD_HAPTIC_APP_STORAGE_KEY, this.keyboardHapticEnabled);
+    AppStorage.setOrCreate(KEYBOARD_KEY_PREVIEW_APP_STORAGE_KEY, this.keyboardKeyPreviewEnabled);
+    AppStorage.setOrCreate(KEYBOARD_THEME_APP_STORAGE_KEY, this.keyboardTheme);
+  }
+
+  /** Reloads persisted settings only after the writer's putSync/flushSync pair has settled. */
+  private scheduleKeyboardPreferenceReload(source: string): void {
+    if (this.keyboardPreferenceReloadTimer !== -1) {
+      clearTimeout(this.keyboardPreferenceReloadTimer);
+      this.keyboardPreferenceReloadTimer = -1;
+    }
+    this.keyboardPreferenceReloadTimer = setTimeout((): void => {
+      this.keyboardPreferenceReloadTimer = -1;
+      this.reloadKeyboardPanelPreferences(source);
+    }, KEYBOARD_PREFERENCE_FLUSH_SETTLE_MS);
+  }
+
+  private reloadKeyboardPanelPreferences(source: string): void {
+    const context = this.imeContext;
+    if (context === undefined) {
+      return;
+    }
+    try {
+      // getPreferencesSync() deliberately returns a process-local cached
+      // Preferences object.  On the connected device, multiProcessChange
+      // arrived before this cached object exposed the writer's flushed value,
+      // so an IME-side read returned the old zero test offset.  Release our
+      // listener/reference first (the SDK requires this), evict that cache,
+      // then reopen and re-subscribe to a fresh view of the persisted store.
+      this.refreshKeyboardHeightPreferences(context, source);
+      const previousFactor = this.keyboardHeightFactor;
+      const previousTestOffset = this.keyboardHeightTestOffsetPixels;
+      const nextFactor = KeyboardHeightSettings.read(context);
+      const nextTestOffset = KeyboardHeightSettings.readTestOffset(context);
+      const nextHapticEnabled = KeyboardHeightSettings.readHapticEnabled(context);
+      const nextKeyPreviewEnabled = KeyboardHeightSettings.readKeyPreviewEnabled(context);
+      const nextTheme = KeyboardHeightSettings.readTheme(context);
+      this.keyboardHeightFactor = nextFactor;
+      this.keyboardHeightTestOffsetPixels = nextTestOffset;
+      this.keyboardHapticEnabled = nextHapticEnabled;
+      this.keyboardKeyPreviewEnabled = nextKeyPreviewEnabled;
+      this.keyboardTheme = nextTheme;
+      this.publishKeyboardVisualPreferences();
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT preference reload source=${source} factor=${nextFactor} directTestOffsetPixels=${nextTestOffset} ` +
+          `haptic=${nextHapticEnabled} keyPreview=${nextKeyPreviewEnabled} theme=${nextTheme}`);
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HAPTIC setting loaded enabled=${nextHapticEnabled} source=${source}`);
+      if (Math.abs(previousFactor - nextFactor) >= 0.005 || previousTestOffset !== nextTestOffset) {
+        this.scheduleLiveKeyboardHeight(
+          nextTestOffset !== previousTestOffset ? 'direct-panel-test' : 'multiProcessChange-factor',
+          nextTestOffset !== previousTestOffset,
+        );
+      }
+    } catch (error) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT preference reload failed source=${source}: ${this.describeRuntimeError(error)}`);
+    }
+  }
+
+  /**
+   * Reopens the public Preferences store after a remote write.  This is not a
+   * polling workaround: it is the documented cache-release sequence required
+   * to read the other process's flushed data from an existing IME process.
+   */
+  private refreshKeyboardHeightPreferences(context: InputMethodExtensionContext, source: string): void {
+    if (this.keyboardHeightPreferences !== undefined) {
+      try {
+        this.keyboardHeightPreferences.off('multiProcessChange', this.onKeyboardHeightPreferenceChanged);
+      } catch (error) {
+        hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+          `HEIGHT preference listener refresh removal failed source=${source}: ${this.describeRuntimeError(error)}`);
+      }
+      this.keyboardHeightPreferences = undefined;
+    }
+    const applicationContext = context.getApplicationContext();
+    preferences.removePreferencesFromCacheSync(applicationContext, {
+      name: KEYBOARD_HEIGHT_PREFERENCES_STORE,
+    });
+    this.keyboardHeightPreferences = KeyboardHeightSettings.open(context);
+    this.keyboardHeightPreferences.on('multiProcessChange', this.onKeyboardHeightPreferenceChanged);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `HEIGHT preference cache refreshed source=${source} store=${KEYBOARD_HEIGHT_PREFERENCES_STORE}`);
+  }
+
+  /**
+   * Coalesces drag updates without losing the final stored value. The direct
+   * test bypasses this delay so a human can observe the requested ±150px move.
+   */
+  private scheduleLiveKeyboardHeight(reason: string, immediate: boolean = false): void {
+    if (this.keyboardHeightApplyTimer !== -1) {
+      clearTimeout(this.keyboardHeightApplyTimer);
+      this.keyboardHeightApplyTimer = -1;
+    }
+    const apply = (): void => {
+      this.keyboardHeightApplyTimer = -1;
+      void this.applyLiveKeyboardHeight(reason);
+    };
+    if (immediate) {
+      apply();
+      return;
+    }
+    this.keyboardHeightApplyTimer = setTimeout(apply, KEYBOARD_HEIGHT_LIVE_THROTTLE_MS);
+  }
+
+  /**
+   * The SDK's public multiProcessChange observer is the live signal.  It was
+   * proven to fire on-device; a parallel poll would only keep reopening a
+   * cached preference file and make the geometry path harder to diagnose.
+   */
+  private startKeyboardHeightPreferencePolling(): void {
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      'HEIGHT live settings source=Preferences.multiProcessChange cacheRefresh=true');
+  }
+
+  private stopKeyboardHeightPreferencePolling(): void {
+    if (this.keyboardHeightPollTimer !== -1) {
+      clearInterval(this.keyboardHeightPollTimer);
+      this.keyboardHeightPollTimer = -1;
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s', 'HEIGHT preference poll stopped');
+    }
+    if (this.keyboardHeightApplyTimer !== -1) {
+      clearTimeout(this.keyboardHeightApplyTimer);
+      this.keyboardHeightApplyTimer = -1;
+    }
+    if (this.keyboardPreferenceReloadTimer !== -1) {
+      clearTimeout(this.keyboardPreferenceReloadTimer);
+      this.keyboardPreferenceReloadTimer = -1;
+    }
+  }
+
+  /** Recomputes the real fixed panel rectangle without showing, hiding, or rebuilding it. */
+  private async applyLiveKeyboardHeight(reason: string): Promise<void> {
+    const panel = this.panel;
+    const inputClient = this.inputClient;
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `HEIGHT panel exists=${panel !== undefined} currentRect=${this.describeFixedKeyboardPanelRect()} reason=${reason}`);
+    if (panel === undefined || inputClient === undefined) {
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel live height update deferred reason=${reason} panel=${panel !== undefined} client=${inputClient !== undefined}`);
+      return;
+    }
+    const applied = await this.configureFixedKeyboardPanelRect(panel, inputClient, reason);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `IME panel live height update result=${applied} reason=${reason} rect=${this.describeFixedKeyboardPanelRect()}`);
   }
 
   /**
@@ -2470,13 +3855,13 @@ export class KeyMagicImeController {
       this.diagnosticKey = `raw DOWN keyCode=${event.key.code}`;
       hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `IME PHYSICAL DOWN store=${IME_DIAGNOSTICS_PREFERENCES} ${this.diagnosticsContextIdentity} ` +
-        `diagnosticCounter=${this.diagnosticCounter} lastDiagnosticTimestamp=${this.diagnosticTimestamp} ` +
-        `rawKeyCode=${event.key.code}`);
+          `diagnosticCounter=${this.diagnosticCounter} lastDiagnosticTimestamp=${this.diagnosticTimestamp} ` +
+          `rawKeyCode=${event.key.code}`);
       this.publishTransportDiagnostics(`physical DOWN rawKeyCode=${event.key.code}`);
     } catch (error) {
       hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `IME DIAGNOSTICS COUNTER FAILED store=${IME_DIAGNOSTICS_PREFERENCES} ` +
-        `${this.diagnosticsContextIdentity}: ${JSON.stringify(error)}`);
+          `${this.diagnosticsContextIdentity}: ${JSON.stringify(error)}`);
     }
   }
 
@@ -2517,11 +3902,11 @@ export class KeyMagicImeController {
       this.diagnosticsPreferences.flushSync();
       hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `IME DIAGNOSTICS FLUSH SUCCESS store=${IME_DIAGNOSTICS_PREFERENCES} ` +
-        `${this.diagnosticsContextIdentity} reason=${reason}`);
+          `${this.diagnosticsContextIdentity} reason=${reason}`);
     } catch (error) {
       hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `Unable to publish IME transport diagnostics store=${IME_DIAGNOSTICS_PREFERENCES} ` +
-        `${this.diagnosticsContextIdentity} reason=${reason}: ${JSON.stringify(error)}`);
+          `${this.diagnosticsContextIdentity} reason=${reason}: ${JSON.stringify(error)}`);
     }
   }
 
@@ -2533,11 +3918,11 @@ export class KeyMagicImeController {
       this.diagnosticsPreferences.putSync(key, value);
       hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `IME DIAGNOSTICS WRITE store=${IME_DIAGNOSTICS_PREFERENCES} ${this.diagnosticsContextIdentity} ` +
-        `reason=${reason} key=${key} value=${value}`);
+          `reason=${reason} key=${key} value=${value}`);
     } catch (error) {
       hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `IME DIAGNOSTICS WRITE FAILED store=${IME_DIAGNOSTICS_PREFERENCES} ` +
-        `${this.diagnosticsContextIdentity} reason=${reason} key=${key}: ${JSON.stringify(error)}`);
+          `${this.diagnosticsContextIdentity} reason=${reason} key=${key}: ${JSON.stringify(error)}`);
       throw new Error(`Unable to write diagnostic key ${key}: ${JSON.stringify(error)}`);
     }
   }
@@ -2558,37 +3943,304 @@ export class KeyMagicImeController {
     }
   }
 
-  private async showPanel(): Promise<void> {
-    if (this.panel === undefined) {
+  /** Creates, sizes, and displays the one fixed software keyboard for an active editor. */
+  private async ensureFixedKeyboardPanelForActiveSession(reason: string): Promise<void> {
+    const inputClient = this.inputClient;
+    if (inputClient === undefined) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel session request skipped reason=${reason}: no active input client.`);
       return;
     }
+
+    if (this.panel === undefined) {
+      if (this.panelInitialization === undefined) {
+        this.panelInitialization = this.createFixedKeyboardPanel();
+      }
+      const pendingInitialization = this.panelInitialization;
+      try {
+        await pendingInitialization;
+      } finally {
+        if (this.panelInitialization === pendingInitialization) {
+          this.panelInitialization = undefined;
+        }
+      }
+    }
+
+    // inputStop can occur while createPanel()/setUiContent() is awaiting IPC.
+    // A stale request may leave the prepared panel for the next session but
+    // must never show it over a session that has already ended.
+    if (this.inputClient !== inputClient) {
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel session request became stale reason=${reason}; show skipped.`);
+      return;
+    }
+    const panel = this.panel;
+    if (panel === undefined) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel session request failed reason=${reason}: panel was not created.`);
+      return;
+    }
+
+    if (!await this.configureFixedKeyboardPanelRect(panel, inputClient, reason)) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel show blocked reason=${reason}: no valid fixed panel rect.`);
+      return;
+    }
+    await this.showPanel(reason);
+  }
+
+  /** Creates a SOFT_KEYBOARD/FLG_FIXED panel and attaches the ArkUI page. */
+  private async createFixedKeyboardPanel(): Promise<void> {
+    const inputMethodAbility = this.inputMethodAbility;
+    const context = this.imeContext;
+    if (inputMethodAbility === undefined || context === undefined) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel create skipped: ability=${inputMethodAbility !== undefined} context=${context !== undefined}`);
+      return;
+    }
+
+    let panel: inputMethodEngine.Panel;
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      'IME panel create begin type=SOFT_KEYBOARD flag=FLG_FIXED.');
     try {
-      await this.panel.show();
+      panel = await inputMethodAbility.createPanel(context, {
+        type: inputMethodEngine.PanelType.SOFT_KEYBOARD,
+        flag: inputMethodEngine.PanelFlag.FLG_FIXED,
+      });
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        'IME panel create success type=SOFT_KEYBOARD flag=FLG_FIXED.');
     } catch (error) {
-      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s', `Unable to show IME panel: ${JSON.stringify(error)}`);
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel create failure: ${this.describeRuntimeError(error)}`);
+      return;
+    }
+
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `IME panel UI content load begin page=${IME_PANEL_PAGE}`);
+    try {
+      await panel.setUiContent(IME_PANEL_PAGE);
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel UI content load success page=${IME_PANEL_PAGE}`);
+    } catch (error) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel UI content load failure page=${IME_PANEL_PAGE}: ${this.describeRuntimeError(error)}`);
+      await this.destroyPanel(inputMethodAbility, panel, 'UI content load failure');
+      return;
+    }
+
+    this.panel = panel;
+    panel.on('sizeChange', this.onCompositionPopupSizeChange);
+    panel.on('show', this.onPanelShow);
+    panel.on('hide', this.onPanelHide);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `IME panel ready page=${IME_PANEL_PAGE}; waiting for fixed rect before show.`);
+  }
+
+  /**
+   * Resolves height in display pixels. Calling-window height is deliberately
+   * excluded: native and Android-container apps frequently report their
+   * already-resized content area after the IME appears, which collapsed the
+   * previous Low/Default/High values into the same safe maximum.
+   */
+  private resolveKeyboardPanelHeight(
+    displayHeight: number,
+    displayWidth: number,
+    densityPixels: number,
+    savedFactor: number,
+    directTestOffsetPixels: number,
+  ): FixedKeyboardHeightMetrics {
+    const displaySafeMaximum = Math.min(
+      displayHeight,
+      Math.max(1, Math.round(displayHeight * FIXED_KEYBOARD_DISPLAY_HEIGHT_RATIO)),
+    );
+    const preferredDefaultHeight = Math.max(
+      Math.round(displayWidth * FIXED_KEYBOARD_WIDTH_HEIGHT_RATIO),
+      Math.round(FIXED_KEYBOARD_MIN_LAYOUT_HEIGHT_VP * densityPixels),
+    );
+    const baseHeight = Math.min(preferredDefaultHeight, displaySafeMaximum);
+    const safeMinimum = Math.min(
+      displaySafeMaximum,
+      Math.max(
+        Math.round(FIXED_KEYBOARD_SAFE_MIN_LAYOUT_HEIGHT_VP * densityPixels),
+        Math.round(baseHeight * FIXED_KEYBOARD_MIN_FACTOR_VISIBLE_RATIO),
+      ),
+    );
+    const normalizedFactor = KeyboardHeightSettings.normalize(savedFactor);
+    const desiredHeight = Math.round(baseHeight * normalizedFactor) + directTestOffsetPixels;
+    return {
+      factor: normalizedFactor,
+      baseHeight,
+      desiredHeight,
+      safeMinimum,
+      safeMaximum: displaySafeMaximum,
+      finalHeight: Math.max(safeMinimum, Math.min(displaySafeMaximum, desiredHeight)),
+      directTestOffsetPixels,
+    };
+  }
+
+  /** Logs every requested slider endpoint so a collapsed range is immediately visible in Hilog. */
+  private logKeyboardHeightRange(
+    displayHeight: number,
+    displayWidth: number,
+    densityPixels: number,
+    reason: string,
+  ): void {
+    const low = this.resolveKeyboardPanelHeight(displayHeight, displayWidth, densityPixels,
+      KEYBOARD_HEIGHT_FACTOR_MIN, 0);
+    const normal = this.resolveKeyboardPanelHeight(displayHeight, displayWidth, densityPixels,
+      KEYBOARD_HEIGHT_FACTOR_DEFAULT, 0);
+    const high = this.resolveKeyboardPanelHeight(displayHeight, displayWidth, densityPixels,
+      KEYBOARD_HEIGHT_FACTOR_MAX, 0);
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `HEIGHT range reason=${reason} factor0.80=${low.finalHeight} factor1.00=${normal.finalHeight} ` +
+        `factor1.30=${high.finalHeight} base=${normal.baseHeight} safeMin=${normal.safeMinimum} ` +
+        `safeMax=${normal.safeMaximum} density=${densityPixels}`);
+  }
+
+  /** Applies a complete, bottom-anchored rect and resizes an already shown FLG_FIXED panel. */
+  private async configureFixedKeyboardPanelRect(
+    panel: inputMethodEngine.Panel,
+    inputClient: inputMethodEngine.InputClient,
+    reason: string,
+  ): Promise<boolean> {
+    let callingWindow: CompositionPopupRect | undefined;
+    try {
+      const windowInfo = await inputClient.getCallingWindowInfo();
+      callingWindow = {
+        left: windowInfo.rect.left,
+        top: windowInfo.rect.top,
+        width: windowInfo.rect.width,
+        height: windowInfo.rect.height,
+      };
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT callingWindow reason=${reason} ${this.describeCompositionPopupRect(callingWindow)} ` +
+          `status=${windowInfo.status}`);
+    } catch (error) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT callingWindow unavailable reason=${reason}: ${this.describeRuntimeError(error)}`);
+    }
+
+    let densityPixels = 1;
+    let displayBounds: CompositionPopupRect | undefined;
+    try {
+      const defaultDisplay = display.getDefaultDisplaySync();
+      displayBounds = { left: 0, top: 0, width: defaultDisplay.width, height: defaultDisplay.height };
+      if (defaultDisplay.densityPixels > 0) {
+        densityPixels = defaultDisplay.densityPixels;
+      }
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT displayBounds reason=${reason} ${this.describeCompositionPopupRect(displayBounds)} density=${densityPixels}`);
+    } catch (error) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT display bounds unavailable reason=${reason}: ${this.describeRuntimeError(error)}`);
+      return false;
+    }
+    if (displayBounds.width <= 0 || displayBounds.height <= 0) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT invalid display bounds reason=${reason} ${this.describeCompositionPopupRect(displayBounds)}`);
+      return false;
+    }
+    this.logKeyboardHeightRange(displayBounds.height, displayBounds.width, densityPixels, reason);
+    const heightMetrics = this.resolveKeyboardPanelHeight(
+      displayBounds.height,
+      displayBounds.width,
+      densityPixels,
+      this.keyboardHeightFactor,
+      this.keyboardHeightTestOffsetPixels,
+    );
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `HEIGHT calculation reason=${reason} factor=${heightMetrics.factor} baseHeight=${heightMetrics.baseHeight} ` +
+        `desiredHeight=${heightMetrics.desiredHeight} safeMin=${heightMetrics.safeMinimum} ` +
+        `safeMax=${heightMetrics.safeMaximum} finalHeight=${heightMetrics.finalHeight} ` +
+        `directTestOffsetPixels=${heightMetrics.directTestOffsetPixels}`);
+    const fixedRect: CompositionPopupRect = {
+      left: displayBounds.left,
+      top: displayBounds.top + displayBounds.height - heightMetrics.finalHeight,
+      width: displayBounds.width,
+      height: heightMetrics.finalHeight,
+    };
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `HEIGHT currentRect=${this.describeFixedKeyboardPanelRect()} targetRect=${this.describeCompositionPopupRect(fixedRect)} ` +
+        `reason=${reason}`);
+    const previousRect = this.fixedKeyboardPanelRect;
+    // Make the target available to the asynchronous sizeChange diagnostic as
+    // soon as this transaction begins. Restore it if either panel API fails.
+    this.fixedKeyboardPanelRect = fixedRect;
+    try {
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT adjustPanelRect begin targetRect=${this.describeCompositionPopupRect(fixedRect)}`);
+      panel.adjustPanelRect(inputMethodEngine.PanelFlag.FLG_FIXED, {
+        portraitRect: fixedRect,
+        landscapeRect: fixedRect,
+      });
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s', 'HEIGHT adjustPanelRect result=success');
+      // adjustPanelRect configures the fixed rect. resize() updates the
+      // existing visible panel immediately, which is essential for a slider.
+      await panel.resize(fixedRect.width, fixedRect.height);
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT panel.resize result=success reason=${reason} currentRect=${this.describeFixedKeyboardPanelRect()}`);
+      return true;
+    } catch (error) {
+      this.fixedKeyboardPanelRect = previousRect;
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `HEIGHT adjustPanelRect/resize error reason=${reason}: ${this.describeRuntimeError(error)} ` +
+          `targetRect=${this.describeCompositionPopupRect(fixedRect)}`);
+      return false;
     }
   }
 
-  private async hidePanel(): Promise<void> {
-    if (this.panel === undefined) {
-      return;
-    }
-    try {
-      await this.panel.hide();
-    } catch (error) {
-      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s', `Unable to hide IME panel: ${JSON.stringify(error)}`);
-    }
+  private describeFixedKeyboardPanelRect(): string {
+    return this.describeCompositionPopupRect(this.fixedKeyboardPanelRect);
   }
 
+  private async showPanel(reason: string = 'unspecified'): Promise<void> {
+    const panel = this.panel;
+    if (panel === undefined) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel.show skipped reason=${reason}: panel is undefined.`);
+      return;
+    }
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `IME panel.show begin reason=${reason} rect=${this.describeFixedKeyboardPanelRect()}`);
+    try {
+      await panel.show();
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel.show success reason=${reason} rect=${this.describeFixedKeyboardPanelRect()}`);
+    } catch (error) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel.show failure reason=${reason}: ${this.describeRuntimeError(error)}`);
+    }
+  }
+  private async hidePanel(reason: string = 'unspecified'): Promise<void> {
+    const panel = this.panel;
+    if (panel === undefined) {
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel.hide skipped reason=${reason}: panel is undefined.`);
+      return;
+    }
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `IME panel.hide begin reason=${reason} rect=${this.describeFixedKeyboardPanelRect()}`);
+    try {
+      await panel.hide();
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel.hide success reason=${reason}`);
+    } catch (error) {
+      hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `IME panel.hide failure reason=${reason}: ${this.describeRuntimeError(error)}`);
+    }
+  }
   private async destroyPanel(
     inputMethodAbility: inputMethodEngine.InputMethodAbility,
     panel: inputMethodEngine.Panel,
+    reason: string = 'unspecified',
   ): Promise<void> {
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s', `IME panel destroy begin reason=${reason}`);
     try {
       await inputMethodAbility.destroyPanel(panel);
+      hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s', `IME panel destroy success reason=${reason}`);
     } catch (error) {
       hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
-        `Unable to destroy IME panel: ${JSON.stringify(error)}`);
+        `IME panel destroy failure reason=${reason}: ${this.describeRuntimeError(error)}`);
     }
   }
 }

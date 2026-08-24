@@ -5,14 +5,23 @@
     "description": "$string:module_desc",
     "mainElement": "Keymagic3Ability",
     "deviceTypes": [
-      "2in1"
+      "default",
+      "tablet"
     ],
     "deliveryWithInstall": true,
     "installationFree": false,
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.VIBRATE"
+      }
+    ],
     "pages": "$profile:main_pages",
     "proxyData": [
       {
         "uri": "datashareproxy://com.szl.myankey/keymagic3/keyboard-selection"
+      },
+      {
+        "uri": "datashareproxy://com.szl.myankey/keymagic3/keyboard-visual-settings"
       }
     ],
     "abilities": [

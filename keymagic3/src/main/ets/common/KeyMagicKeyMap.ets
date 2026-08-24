@@ -254,3 +254,24 @@ export function keyMagicInputFromInputMethodEvent(event: InputMethodKeyEvent): K
     capsLock: event.capsLock,
   };
 }
+
+/**
+ * Creates the same platform-neutral KeyMagic input shape for a virtual key.
+ * The caller supplies the logical KeyMagic virtual-key value and the exact
+ * ASCII character a matching physical key would provide. Burmese text never
+ * enters this boundary: the loaded KM2 rules remain its only producer.
+ */
+export function keyMagicInputFromVirtualKey(
+  keyCode: KeyMagicVirtualKey,
+  character: string = '',
+  shift: boolean = false,
+): KeyMagicKeyInput {
+  return {
+    keyCode,
+    character,
+    shift,
+    ctrl: false,
+    alt: false,
+    capsLock: false,
+  };
+}

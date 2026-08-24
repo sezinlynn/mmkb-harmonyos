@@ -1,6 +1,6 @@
 # the minimum version of CMake.
 cmake_minimum_required(VERSION 3.5.0)
-project(keymagic-harmonyos)
+project(mmkb_harmonyos)
 
 set(NATIVERENDER_ROOT_PATH ${CMAKE_CURRENT_SOURCE_DIR})
 get_filename_component(KEYMAGIC_REPOSITORY_ROOT "${NATIVERENDER_ROOT_PATH}/../../../../.." ABSOLUTE)
@@ -25,7 +25,7 @@ if(NOT EXISTS "${KEYMAGIC_CORE_LIB}")
     message(FATAL_ERROR
         "keymagic-core static library was not found at ${KEYMAGIC_CORE_LIB}. "
         "From the repository root, set OHOS_SDK_HOME to the OpenHarmony SDK directory "
-        "and run: powershell -ExecutionPolicy Bypass -File keymagic-harmonyos/scripts/build-core-ohos.ps1 -Profile ${KEYMAGIC_CORE_PROFILE}")
+        "and run: powershell -ExecutionPolicy Bypass -File mmkb-harmonyos/scripts/build-core-ohos.ps1 -Profile ${KEYMAGIC_CORE_PROFILE}")
 endif()
 
 add_library(keymagic_core STATIC IMPORTED GLOBAL)
