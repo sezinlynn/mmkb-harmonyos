@@ -60,6 +60,10 @@ const KEY_PREVIEW_BURMESE_LINE_HEIGHT = 38;
 // than the previous 18 ms diagnostic on typical phone motors.
 const HAPTIC_TAP_DURATION_MS = 30;
 const HAPTIC_LONG_PRESS_DURATION_MS = 36;
+// Keep the phone keyboard full width. A wide tablet panel uses a centered,
+// comfortably sized content area; reduced multi-window widths stay fluid.
+const LARGE_SCREEN_KEYBOARD_MIN_WIDTH_VP = 1000;
+const LARGE_SCREEN_KEYBOARD_CONTENT_MAX_WIDTH_VP = 960;
 
 interface HapticRuntimeError {
   code?: number;
@@ -1181,6 +1185,12 @@ struct KeyMagicImeStatus {
     return this.languageMode === KeyboardLanguageMode.Burmese;
   }
 
+  private keyboardContentWidth(): string {
+    const availableWidthVp = this.keyboardPageWidth > 0 ? this.getUIContext().px2vp(this.keyboardPageWidth) : 0;
+    return availableWidthVp >= LARGE_SCREEN_KEYBOARD_MIN_WIDTH_VP ?
+      `${LARGE_SCREEN_KEYBOARD_CONTENT_MAX_WIDTH_VP}vp` : '100%';
+  }
+
   private isMmUnicodeLayout(): boolean {
     return this.keyboardLayoutId === MM_UNICODE_KEYBOARD_ID;
   }
@@ -2038,7 +2048,7 @@ struct KeyMagicImeStatus {
         this.buildBottomRow()
       }
     }
-    .width('100%')
+    .width(this.keyboardContentWidth())
     .height('100%')
     .padding({
       left: this.isBurmeseMode() ? 4 : 6,
@@ -2050,13 +2060,14 @@ struct KeyMagicImeStatus {
   }
 
   build() {
-    Stack({ alignContent: Alignment.TopStart }) {
+    Stack({ alignContent: Alignment.Top }) {
       this.buildKeyboardContent()
       this.buildKeyPreviewPopup()
       this.buildBurmeseLongPressPopup()
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(this.panelColor())
     .onAreaChange((previous: Area, next: Area) => this.recordKeyboardPageArea(previous, next))
   }
 }

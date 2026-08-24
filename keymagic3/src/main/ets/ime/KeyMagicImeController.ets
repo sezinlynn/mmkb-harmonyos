@@ -117,6 +117,11 @@ const FIXED_KEYBOARD_MIN_LAYOUT_HEIGHT_VP = 360;
 // but never clips any row.
 const FIXED_KEYBOARD_SAFE_MIN_LAYOUT_HEIGHT_VP = 220;
 const FIXED_KEYBOARD_WIDTH_HEIGHT_RATIO = 0.52;
+// Phone and narrow-window geometry must retain the established full-width
+// calculation. On genuinely wide windows, use the same effective width as
+// the centered panel content so landscape tablets do not create a huge IME.
+const FIXED_KEYBOARD_LARGE_SCREEN_MIN_WIDTH_VP = 1000;
+const FIXED_KEYBOARD_LARGE_SCREEN_CONTENT_MAX_WIDTH_VP = 960;
 // A calling window is already reduced by the displayed IME on many phone
 // apps. It must never become the ceiling for a fixed keyboard panel or the
 // whole slider range can collapse to one value. Use the display coordinate
@@ -129,6 +134,7 @@ const BACKSPACE_DELETE_WATCHDOG_MS = 300;
 
 interface FixedKeyboardHeightMetrics {
   factor: number;
+  layoutWidth: number;
   baseHeight: number;
   desiredHeight: number;
   safeMinimum: number;
@@ -4075,12 +4081,16 @@ export class KeyMagicImeController {
     savedFactor: number,
     directTestOffsetPixels: number,
   ): FixedKeyboardHeightMetrics {
+    const availableWidthVp = densityPixels > 0 ? displayWidth / densityPixels : displayWidth;
+    const layoutWidth = availableWidthVp >= FIXED_KEYBOARD_LARGE_SCREEN_MIN_WIDTH_VP ?
+      Math.min(displayWidth, Math.round(FIXED_KEYBOARD_LARGE_SCREEN_CONTENT_MAX_WIDTH_VP * densityPixels)) :
+      displayWidth;
     const displaySafeMaximum = Math.min(
       displayHeight,
       Math.max(1, Math.round(displayHeight * FIXED_KEYBOARD_DISPLAY_HEIGHT_RATIO)),
     );
     const preferredDefaultHeight = Math.max(
-      Math.round(displayWidth * FIXED_KEYBOARD_WIDTH_HEIGHT_RATIO),
+      Math.round(layoutWidth * FIXED_KEYBOARD_WIDTH_HEIGHT_RATIO),
       Math.round(FIXED_KEYBOARD_MIN_LAYOUT_HEIGHT_VP * densityPixels),
     );
     const baseHeight = Math.min(preferredDefaultHeight, displaySafeMaximum);
@@ -4095,6 +4105,7 @@ export class KeyMagicImeController {
     const desiredHeight = Math.round(baseHeight * normalizedFactor) + directTestOffsetPixels;
     return {
       factor: normalizedFactor,
+      layoutWidth,
       baseHeight,
       desiredHeight,
       safeMinimum,
@@ -4119,8 +4130,8 @@ export class KeyMagicImeController {
       KEYBOARD_HEIGHT_FACTOR_MAX, 0);
     hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
       `HEIGHT range reason=${reason} factor0.80=${low.finalHeight} factor1.00=${normal.finalHeight} ` +
-        `factor1.30=${high.finalHeight} base=${normal.baseHeight} safeMin=${normal.safeMinimum} ` +
-        `safeMax=${normal.safeMaximum} density=${densityPixels}`);
+      `factor1.30=${high.finalHeight} base=${normal.baseHeight} safeMin=${normal.safeMinimum} ` +
+        `safeMax=${normal.safeMaximum} layoutWidth=${normal.layoutWidth} density=${densityPixels}`);
   }
 
   /** Applies a complete, bottom-anchored rect and resizes an already shown FLG_FIXED panel. */
@@ -4176,7 +4187,7 @@ export class KeyMagicImeController {
     );
     hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
       `HEIGHT calculation reason=${reason} factor=${heightMetrics.factor} baseHeight=${heightMetrics.baseHeight} ` +
-        `desiredHeight=${heightMetrics.desiredHeight} safeMin=${heightMetrics.safeMinimum} ` +
+        `layoutWidth=${heightMetrics.layoutWidth} desiredHeight=${heightMetrics.desiredHeight} safeMin=${heightMetrics.safeMinimum} ` +
         `safeMax=${heightMetrics.safeMaximum} finalHeight=${heightMetrics.finalHeight} ` +
         `directTestOffsetPixels=${heightMetrics.directTestOffsetPixels}`);
     const fixedRect: CompositionPopupRect = {
