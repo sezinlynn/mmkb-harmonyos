@@ -18,8 +18,7 @@ export class KeyboardManager {
   // and IME cycling have one source of truth.
   private readonly keyboardCycleIds: string[] = [
     'zawcode',
-    '',
-    '-mm',
+    'mm-unicode',
   ];
 
   getKeyboards(activeKeyboardId?: string): KeyboardInfo[] {

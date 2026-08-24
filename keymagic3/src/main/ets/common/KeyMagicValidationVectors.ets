@@ -25,19 +25,19 @@ const vowelE: KeyMagicValidationStep = {
   input: { keyCode: KeyMagicVirtualKey.KeyA, character: 'a' },
   expected: {
     actionType: KeyMagicActionType.Insert,
-    text: '\u200C\u1031',
+    text: '\u200A\u1031',
     deleteCount: 0,
-    composingText: '\u200C\u1031',
+    composingText: '\u200A\u1031',
     isProcessed: true,
   },
 };
 
 /**
- * Expected values are traced from keyboards/bundled/.km2 through the
+ * Expected values are traced from keyboards/MM Unicode.km2 through the
  * existing C FFI. They deliberately do not use the KMS fixture, whose icon
  * path is absent from this checkout.
  */
-export const _VALIDATION_VECTORS: KeyMagicValidationVector[] = [
+export const MM_UNICODE_VALIDATION_VECTORS: KeyMagicValidationVector[] = [
   {
     name: 'Single consonant: u -> က',
     steps: [{
@@ -109,7 +109,7 @@ export const _VALIDATION_VECTORS: KeyMagicValidationVector[] = [
     ],
   },
   {
-    name: 'Medial reorder: a, s -> ‌ျေ',
+    name: 'Medial reorder: a, s ->  ျေ',
     steps: [
       vowelE,
       {
@@ -119,7 +119,7 @@ export const _VALIDATION_VECTORS: KeyMagicValidationVector[] = [
           actionType: KeyMagicActionType.BackspaceDeleteAndInsert,
           text: '\u103B\u1031',
           deleteCount: 1,
-          composingText: '\u200C\u103B\u1031',
+          composingText: '\u200A\u103B\u1031',
           isProcessed: true,
         },
       },
@@ -211,7 +211,7 @@ export const _VALIDATION_VECTORS: KeyMagicValidationVector[] = [
     ],
   },
   {
-    name: 'Smart backspace: a, u, Back -> ‌ေ',
+    name: 'Smart backspace: a, u, Back ->  ေ',
     steps: [
       vowelE,
       {
@@ -230,9 +230,9 @@ export const _VALIDATION_VECTORS: KeyMagicValidationVector[] = [
         input: { keyCode: KeyMagicVirtualKey.Back },
         expected: {
           actionType: KeyMagicActionType.BackspaceDeleteAndInsert,
-          text: '\u200C\u1031',
+          text: '\u200A\u1031',
           deleteCount: 2,
-          composingText: '\u200C\u1031',
+          composingText: '\u200A\u1031',
           isProcessed: true,
         },
       },

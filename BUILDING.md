@@ -48,7 +48,7 @@ Bundled KeyMagic rules are loaded from:
 keymagic3/src/main/resources/rawfile/keyboards/
 ```
 
-Expected files are `.km2`, `.km2`, and `ZawCode.km2`. Confirm each layout's redistribution permission before adding or replacing a rule file; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Expected files are `ZawCode.km2` and `MM Unicode.km2`. Confirm each layout's redistribution permission before adding or replacing a rule file; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Signing
 

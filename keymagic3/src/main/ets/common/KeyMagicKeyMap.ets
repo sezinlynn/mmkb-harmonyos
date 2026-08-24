@@ -179,7 +179,8 @@ function asciiCharacterFromPhysicalKeyCode(keyCode: number, shift: boolean, caps
   }
 
   if (keyCode >= KeyCode.KEYCODE_0 && keyCode <= KeyCode.KEYCODE_9) {
-    // Shift is carried separately. 's Shift+4 rule expects character '4', not '$'.
+    // Shift is carried separately; the selected KeyMagic layout interprets the
+    // physical digit identity together with this modifier state.
     return String.fromCharCode(0x30 + keyCode - KeyCode.KEYCODE_0);
   }
 

@@ -8,7 +8,7 @@ mmKB is a Myanmar and English software keyboard for HarmonyOS phones and tablets
 - Myanmar and English virtual keyboards, including numbers, symbols, emoji, and configurable appearance, key preview, haptics, and panel height.
 - KeyMagic-compatible Myanmar keyboard-rule processing using bundled `.km2` layouts.
 - Internal Burmese composition shown by the IME until a real commit boundary.
-- Keyboard-layout selection for ZawCode, မြန်စံ (Smart), and .
+- Keyboard-layout selection for ZawCode and MM Unicode.
 
 ## KeyMagic integration
 

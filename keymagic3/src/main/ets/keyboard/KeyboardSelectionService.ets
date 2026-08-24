@@ -58,6 +58,13 @@ function decodeSelection(value: ValueType | undefined): KeyboardSelection | unde
   };
 }
 
+function defaultSelectionAfterUnknownId(selection: KeyboardSelection): KeyboardSelection {
+  return {
+    activeKeyboardId: DEFAULT_KEYBOARD_ID,
+    keyboardGeneration: Math.max(DEFAULT_KEYBOARD_GENERATION, selection.keyboardGeneration + 1),
+  };
+}
+
 /**
  * The only external keyboard-selection API. It deliberately contains no
  * Preferences access: every caller reads and writes the one declared Data
@@ -84,7 +91,13 @@ export class KeyboardSelectionService {
       if (selection === undefined) {
         throw new Error('Keyboard selection IPC returned an invalid selection record.');
       }
-      this.keyboardManager.getKeyboardById(selection.activeKeyboardId);
+      try {
+        this.keyboardManager.getKeyboardById(selection.activeKeyboardId);
+      } catch (_error) {
+        const fallback = defaultSelectionAfterUnknownId(selection);
+        await this.writeSelection(fallback);
+        return fallback;
+      }
       this.publishLocalSelection(selection);
       return selection;
     }

@@ -9,10 +9,14 @@ import {
   EMOJI_CATEGORIES,
 } from '../keyboard/EmojiData';
 import {
+  clearVirtualKeyboardLayoutIdListener,
   clearVirtualKeyboardLanguageModeListener,
   dispatchVirtualKeyPress,
+  getVirtualKeyboardLayoutId,
   getVirtualKeyboardLanguageMode,
   KeyboardLanguageMode,
+  MM_UNICODE_KEYBOARD_ID,
+  setVirtualKeyboardLayoutIdListener,
   setVirtualKeyboardLanguageModeListener,
   VirtualKeyboardCommand,
 } from '../ime/VirtualKeyInputBridge';
@@ -108,9 +112,13 @@ interface VirtualKeyDefinition extends KeyMagicActionDefinition {
  * the virama identity first and then precisely this key's already-declared
  * KeyMagic action (including any existing prefix actions and Shift state).
  */
-function withStackedConsonant(id: string, key: VirtualKeyDefinition): VirtualKeyDefinition {
+function withStackedConsonant(
+  id: string,
+  key: VirtualKeyDefinition,
+  stackAction: KeyMagicActionDefinition = { keyCode: KeyMagicVirtualKey.Oem3, character: '`' },
+): VirtualKeyDefinition {
   const actions: KeyMagicActionDefinition[] = [
-    { keyCode: KeyMagicVirtualKey.Oem3, character: '`' },
+    stackAction,
   ];
   if (key.prefixActions !== undefined) {
     key.prefixActions.forEach((action: KeyMagicActionDefinition): void => {
@@ -146,6 +154,16 @@ function withStackedConsonant(id: string, key: VirtualKeyDefinition): VirtualKey
       actions,
     }],
   };
+}
+
+/** MM Unicode uses F as the KM2 stacked-consonant selector. */
+function withMmUnicodeStackedConsonant(id: string, key: VirtualKeyDefinition): VirtualKeyDefinition {
+  return withStackedConsonant(id, key, {
+    keyCode: KeyMagicVirtualKey.KeyF,
+    character: 'f',
+    shiftedCharacter: 'F',
+    forceShift: true,
+  });
 }
 
 interface PopupKeyAnchor {
@@ -189,6 +207,7 @@ struct KeyMagicImeStatus {
   // The controller owns this value in VirtualKeyInputBridge; this @State is only
   // the reactive rendering subscription for the currently visible panel.
   @State languageMode: KeyboardLanguageMode = getVirtualKeyboardLanguageMode();
+  @State keyboardLayoutId: string = getVirtualKeyboardLayoutId();
   @State keyboardLayer: KeyboardLayer = KeyboardLayer.Letters;
   @State longPressPopupVisible: boolean = false;
   @State longPressPopupLeft: number = 0;
@@ -364,6 +383,82 @@ struct KeyMagicImeStatus {
     withStackedConsonant('burmese-nnya', { label: 'ဉ', keyCode: KeyMagicVirtualKey.KeyN, character: 'n', prefixActions: [{ keyCode: KeyMagicVirtualKey.Oem3, character: '`' }] }),
     { label: '၏', keyCode: KeyMagicVirtualKey.Oem5, character: '\\' },
     withStackedConsonant('burmese-ga', { label: 'ဂ', keyCode: KeyMagicVirtualKey.Key8, character: '8', shiftedCharacter: '8', forceShift: true }),
+  ];
+
+  // MM Unicode is a separate KeyMagic layout. These visible keycaps retain the
+  // same fixed Burmese screen while their physical identities follow its KM2
+  // grammar; no UI-side Burmese reordering is performed.
+  private readonly mmUnicodeNormalRow1: VirtualKeyDefinition[] = [
+    withMmUnicodeStackedConsonant('mm-unicode-sa', { label: 'ဆ', keyCode: KeyMagicVirtualKey.KeyQ, character: 'q' }),
+    withMmUnicodeStackedConsonant('mm-unicode-ta', { label: 'တ', keyCode: KeyMagicVirtualKey.KeyW, character: 'w' }),
+    withMmUnicodeStackedConsonant('mm-unicode-na', { label: 'န', keyCode: KeyMagicVirtualKey.KeyE, character: 'e' }),
+    withMmUnicodeStackedConsonant('mm-unicode-ma', { label: 'မ', keyCode: KeyMagicVirtualKey.KeyR, character: 'r' }),
+    withMmUnicodeStackedConsonant('mm-unicode-a', { label: 'အ', keyCode: KeyMagicVirtualKey.KeyT, character: 't' }),
+    withMmUnicodeStackedConsonant('mm-unicode-pa', { label: 'ပ', keyCode: KeyMagicVirtualKey.KeyY, character: 'y' }),
+    withMmUnicodeStackedConsonant('mm-unicode-ka', { label: 'က', keyCode: KeyMagicVirtualKey.KeyU, character: 'u' }),
+    withMmUnicodeStackedConsonant('mm-unicode-nga', { label: 'င', keyCode: KeyMagicVirtualKey.KeyI, character: 'i' }),
+    withMmUnicodeStackedConsonant('mm-unicode-tha', { label: 'သ', keyCode: KeyMagicVirtualKey.KeyO, character: 'o' }),
+    withMmUnicodeStackedConsonant('mm-unicode-ca', { label: 'စ', keyCode: KeyMagicVirtualKey.KeyP, character: 'p' }),
+    withMmUnicodeStackedConsonant('mm-unicode-ha', { label: 'ဟ', keyCode: KeyMagicVirtualKey.Oem4, character: '[' }),
+  ];
+  private readonly mmUnicodeNormalRow2: VirtualKeyDefinition[] = [
+    { label: 'ေ', keyCode: KeyMagicVirtualKey.KeyA, character: 'a' },
+    { label: 'ျ', keyCode: KeyMagicVirtualKey.KeyS, character: 's' },
+    { label: 'ိ', keyCode: KeyMagicVirtualKey.KeyD, character: 'd' },
+    { label: '်', keyCode: KeyMagicVirtualKey.KeyF, character: 'f' },
+    { label: 'ါ', keyCode: KeyMagicVirtualKey.KeyG, character: 'g' },
+    { label: '့', keyCode: KeyMagicVirtualKey.KeyH, character: 'h' },
+    { label: 'ြ', keyCode: KeyMagicVirtualKey.KeyJ, character: 'j' },
+    { label: 'ု', keyCode: KeyMagicVirtualKey.KeyK, character: 'k' },
+    { label: 'ူ', keyCode: KeyMagicVirtualKey.KeyL, character: 'l' },
+    { label: 'း', keyCode: KeyMagicVirtualKey.Oem1, character: ';' },
+    withMmUnicodeStackedConsonant('mm-unicode-da', { label: 'ဒ', keyCode: KeyMagicVirtualKey.KeyK, character: 'k', shiftedCharacter: 'K', forceShift: true }),
+  ];
+  private readonly mmUnicodeNormalRow3: VirtualKeyDefinition[] = [
+    withMmUnicodeStackedConsonant('mm-unicode-pha', { label: 'ဖ', keyCode: KeyMagicVirtualKey.KeyZ, character: 'z' }),
+    withMmUnicodeStackedConsonant('mm-unicode-hta', { label: 'ထ', keyCode: KeyMagicVirtualKey.KeyX, character: 'x' }),
+    withMmUnicodeStackedConsonant('mm-unicode-kha', { label: 'ခ', keyCode: KeyMagicVirtualKey.KeyC, character: 'c' }),
+    withMmUnicodeStackedConsonant('mm-unicode-la', { label: 'လ', keyCode: KeyMagicVirtualKey.KeyV, character: 'v' }),
+    withMmUnicodeStackedConsonant('mm-unicode-bha', { label: 'ဘ', keyCode: KeyMagicVirtualKey.KeyB, character: 'b' }),
+    withMmUnicodeStackedConsonant('mm-unicode-nya', { label: 'ည', keyCode: KeyMagicVirtualKey.KeyN, character: 'n' }),
+    { label: 'ာ', keyCode: KeyMagicVirtualKey.KeyM, character: 'm' },
+    withMmUnicodeStackedConsonant('mm-unicode-ya', { label: 'ယ', keyCode: KeyMagicVirtualKey.OemComma, character: ',' }),
+  ];
+  private readonly mmUnicodeShiftRow1: VirtualKeyDefinition[] = [
+    withMmUnicodeStackedConsonant('mm-unicode-jha', { label: 'ဈ', keyCode: KeyMagicVirtualKey.KeyQ, character: 'q', shiftedCharacter: 'Q', forceShift: true }),
+    withMmUnicodeStackedConsonant('mm-unicode-tta', { label: 'ဋ', keyCode: KeyMagicVirtualKey.Key3, character: '3', shiftedCharacter: '#', forceShift: true }),
+    { label: 'ဤ', keyCode: KeyMagicVirtualKey.KeyT, character: 't', shiftedCharacter: 'T', forceShift: true },
+    { label: 'ဋ္ဌ', keyCode: KeyMagicVirtualKey.Oem5, character: '\\', shiftedCharacter: '|', forceShift: true },
+    { label: 'ဣ', keyCode: KeyMagicVirtualKey.KeyE, character: 'e', shiftedCharacter: 'E', forceShift: true },
+    { label: '၍', keyCode: KeyMagicVirtualKey.KeyI, character: 'i', shiftedCharacter: 'I', forceShift: true },
+    { label: '၌', keyCode: KeyMagicVirtualKey.KeyY, character: 'y', shiftedCharacter: 'Y', forceShift: true },
+    { label: 'ဿ', keyCode: KeyMagicVirtualKey.KeyO, character: 'o', shiftedCharacter: 'O', forceShift: true },
+    { label: 'ဥ', keyCode: KeyMagicVirtualKey.KeyU, character: 'u', shiftedCharacter: 'U', forceShift: true },
+    withMmUnicodeStackedConsonant('mm-unicode-nna', { label: 'ဏ', keyCode: KeyMagicVirtualKey.KeyP, character: 'p', shiftedCharacter: 'P', forceShift: true }),
+    { label: 'ဧ', keyCode: KeyMagicVirtualKey.Oem4, character: '[', shiftedCharacter: '{', forceShift: true },
+  ];
+  private readonly mmUnicodeShiftRow2: VirtualKeyDefinition[] = [
+    withMmUnicodeStackedConsonant('mm-unicode-ba', { label: 'ဗ', keyCode: KeyMagicVirtualKey.KeyA, character: 'a', shiftedCharacter: 'A', forceShift: true }),
+    { label: 'ှ', keyCode: KeyMagicVirtualKey.KeyS, character: 's', shiftedCharacter: 'S', forceShift: true },
+    { label: 'ီ', keyCode: KeyMagicVirtualKey.KeyD, character: 'd', shiftedCharacter: 'D', forceShift: true },
+    { label: 'င်္', keyCode: KeyMagicVirtualKey.KeyF, character: 'f', shiftedCharacter: 'F', forceShift: true },
+    { label: 'ွ', keyCode: KeyMagicVirtualKey.KeyG, character: 'g', shiftedCharacter: 'G', forceShift: true },
+    { label: 'ံ', keyCode: KeyMagicVirtualKey.KeyH, character: 'h', shiftedCharacter: 'H', forceShift: true },
+    { label: 'ဲ', keyCode: KeyMagicVirtualKey.KeyJ, character: 'j', shiftedCharacter: 'J', forceShift: true },
+    { label: '၎င်း', keyCode: KeyMagicVirtualKey.KeyR, character: 'r', shiftedCharacter: 'R', forceShift: true },
+    withMmUnicodeStackedConsonant('mm-unicode-dda', { label: 'ဍ', keyCode: KeyMagicVirtualKey.Key1, character: '1', shiftedCharacter: '!', forceShift: true }),
+    { label: 'ဩ', keyCode: KeyMagicVirtualKey.Oem6, character: ']' },
+    withMmUnicodeStackedConsonant('mm-unicode-dha', { label: 'ဓ', keyCode: KeyMagicVirtualKey.KeyL, character: 'l', shiftedCharacter: 'L', forceShift: true }),
+  ];
+  private readonly mmUnicodeShiftRow3: VirtualKeyDefinition[] = [
+    withMmUnicodeStackedConsonant('mm-unicode-ja', { label: 'ဇ', keyCode: KeyMagicVirtualKey.KeyZ, character: 'z', shiftedCharacter: 'Z', forceShift: true }),
+    withMmUnicodeStackedConsonant('mm-unicode-ttha', { label: 'ဌ', keyCode: KeyMagicVirtualKey.KeyX, character: 'x', shiftedCharacter: 'X', forceShift: true }),
+    withMmUnicodeStackedConsonant('mm-unicode-gha', { label: 'ဃ', keyCode: KeyMagicVirtualKey.KeyC, character: 'c', shiftedCharacter: 'C', forceShift: true }),
+    withMmUnicodeStackedConsonant('mm-unicode-lla', { label: 'ဠ', keyCode: KeyMagicVirtualKey.KeyV, character: 'v', shiftedCharacter: 'V', forceShift: true }),
+    withMmUnicodeStackedConsonant('mm-unicode-ddha', { label: 'ဎ', keyCode: KeyMagicVirtualKey.Oem3, character: '`', shiftedCharacter: '~', forceShift: true }),
+    withMmUnicodeStackedConsonant('mm-unicode-nnya', { label: 'ဉ', keyCode: KeyMagicVirtualKey.KeyN, character: 'n', shiftedCharacter: 'N', forceShift: true }),
+    { label: '၏', keyCode: KeyMagicVirtualKey.Oem5, character: '\\' },
+    withMmUnicodeStackedConsonant('mm-unicode-ga', { label: 'ဂ', keyCode: KeyMagicVirtualKey.Key8, character: '8', shiftedCharacter: '*', forceShift: true }),
   ];
 
   // Non-letter pages are fixed static layouts. English and Burmese deliberately
@@ -562,6 +657,35 @@ struct KeyMagicImeStatus {
     { kind: 'enter', label: '↵', weight: 1.20 },
   ];
 
+  private readonly mmUnicodeNormalBottomRow: BurmeseBottomKeyDefinition[] = [
+    { kind: 'numbers', label: '123', weight: 1.20 },
+    { kind: 'language', label: '🌐', weight: 1.00 },
+    { kind: 'logical', label: '၀', weight: 1.00,
+      logicalKey: { label: '၀', keyCode: KeyMagicVirtualKey.Key0, character: '0', weight: 1.00 } },
+    { kind: 'space', label: 'space', weight: 4.30 },
+    { kind: 'logical', label: 'ရ', weight: 1.00,
+      logicalKey: withMmUnicodeStackedConsonant('mm-unicode-ra', {
+        label: 'ရ', keyCode: KeyMagicVirtualKey.Key7, character: '7', shiftedCharacter: '&', forceShift: true, weight: 1.00,
+      }) },
+    { kind: 'enter', label: '↵', weight: 1.20 },
+  ];
+  private readonly mmUnicodeShiftBottomRow: BurmeseBottomKeyDefinition[] = [
+    { kind: 'numbers', label: '123', weight: 1.20 },
+    { kind: 'language', label: '🌐', weight: 1.00 },
+    { kind: 'logical', label: '္', weight: 1.00,
+      logicalKey: { label: '္', keyCode: KeyMagicVirtualKey.KeyF, character: 'f', shiftedCharacter: 'F', forceShift: true, weight: 1.00 } },
+    { kind: 'space', label: 'space', weight: 4.30 },
+    { kind: 'logical', label: '။', weight: 1.00,
+      logicalKey: {
+        id: 'mm-unicode-punctuation', label: '။', keyCode: KeyMagicVirtualKey.Oem2, character: '/', weight: 1.00,
+        longPressOptions: [
+          { id: 'mm-unicode-comma', label: '၊', actions: [{ keyCode: KeyMagicVirtualKey.Oem2, character: '/', shiftedCharacter: '?', forceShift: true }] },
+          { id: 'mm-unicode-period', label: '။', actions: [{ keyCode: KeyMagicVirtualKey.Oem2, character: '/' }] },
+        ],
+      } },
+    { kind: 'enter', label: '↵', weight: 1.20 },
+  ];
+
   private readonly onKeyboardLanguageModeChanged = (nextMode: KeyboardLanguageMode): void => {
     const previousMode = this.languageMode;
     this.languageMode = nextMode;
@@ -577,9 +701,20 @@ struct KeyMagicImeStatus {
     }
   };
 
+  private readonly onKeyboardLayoutIdChanged = (nextLayoutId: string): void => {
+    if (this.keyboardLayoutId === nextLayoutId) {
+      return;
+    }
+    this.keyboardLayoutId = nextLayoutId;
+    this.cancelBurmeseLongPress();
+    hilog.info(KEYBOARD_UI_LOG_DOMAIN, KEYBOARD_UI_LOG_TAG, '%{public}s',
+      `KEYBOARD UI LAYOUT changed id=${nextLayoutId}`);
+  };
+
   aboutToAppear(): void {
     this.loadRecentEmojis();
     setVirtualKeyboardLanguageModeListener(this.onKeyboardLanguageModeChanged);
+    setVirtualKeyboardLayoutIdListener(this.onKeyboardLayoutIdChanged);
     hilog.info(KEYBOARD_UI_LOG_DOMAIN, KEYBOARD_UI_LOG_TAG, '%{public}s',
       `HAPTIC setting loaded enabled=${this.hapticEnabled} source=panel-appear`);
   }
@@ -589,6 +724,7 @@ struct KeyMagicImeStatus {
     this.stopBackspaceRepeat();
     this.releaseBackspace();
     clearVirtualKeyboardLanguageModeListener(this.onKeyboardLanguageModeChanged);
+    clearVirtualKeyboardLayoutIdListener(this.onKeyboardLayoutIdChanged);
   }
 
   private onKeyboardPanelVisibilityChanged(): void {
@@ -1045,6 +1181,10 @@ struct KeyMagicImeStatus {
     return this.languageMode === KeyboardLanguageMode.Burmese;
   }
 
+  private isMmUnicodeLayout(): boolean {
+    return this.keyboardLayoutId === MM_UNICODE_KEYBOARD_ID;
+  }
+
   /** Existing controller-published composition presentation, never a second buffer. */
   private shouldShowBurmeseCompositionPopup(): boolean {
     return this.isBurmeseMode() && this.compositionPopupVisible === 'true' && this.composition.length > 0;
@@ -1217,6 +1357,13 @@ struct KeyMagicImeStatus {
   private sendKey(key: VirtualKeyDefinition, triggerFeedback: boolean = true): void {
     if (triggerFeedback) {
       this.triggerHaptic();
+    }
+    const literalText = this.isBurmeseMode() && !this.isLettersLayer() &&
+      key.keyCode !== KeyMagicVirtualKey.Space && key.keyCode !== KeyMagicVirtualKey.Return ?
+      this.keyLabel(key) : undefined;
+    if (literalText !== undefined) {
+      dispatchVirtualKeyPress({ keyCode: key.keyCode, literalText, label: this.keyLabel(key) });
+      return;
     }
     if (key.prefixActions !== undefined) {
       key.prefixActions.forEach((action: KeyMagicActionDefinition, index: number): void => {
@@ -1447,7 +1594,7 @@ struct KeyMagicImeStatus {
       .onTouch((event: TouchEvent) => this.handleBurmeseLongPressTouch(key, keyId, event))
     } else {
       Button() {
-        this.buildKeyLabel(this.keyLabel(key), this.isBurmeseMode())
+        this.buildKeyLabel(this.keyLabel(key), this.isBurmeseMode() && this.isLettersLayer())
       }
       .id(keyId)
       .layoutWeight(key.weight === undefined ? 1 : key.weight)
@@ -1635,12 +1782,15 @@ struct KeyMagicImeStatus {
   }
 
   private burmeseBottomRow(): BurmeseBottomKeyDefinition[] {
+    if (this.isMmUnicodeLayout()) {
+      return this.isShiftActive() ? this.mmUnicodeShiftBottomRow : this.mmUnicodeNormalBottomRow;
+    }
     return this.isShiftActive() ? this.burmeseShiftBottomRow : this.burmeseNormalBottomRow;
   }
 
   private burmeseBottomRowId(): string {
-    // The normal row removed two entries; force a fresh six-control tree.
-    return this.isShiftActive() ? 'MM-shift-bottom-v3' : 'MM-normal-bottom-v3';
+    const layoutPrefix = this.isMmUnicodeLayout() ? 'MM-unicode' : 'ZawCode';
+    return this.isShiftActive() ? `${layoutPrefix}-shift-bottom-v3` : `${layoutPrefix}-normal-bottom-v3`;
   }
 
   @Builder
@@ -1849,15 +1999,21 @@ struct KeyMagicImeStatus {
           this.buildLogicalRow(this.burmeseSymbolRows[1], 'MM-symbol-r2')
           this.buildNonLetterThirdRow(this.burmeseSymbolRows[2], 'MM-symbol-r3', '123', KeyboardLayer.Numbers)
         } else if (this.isShiftActive()) {
-          this.buildLogicalRow(this.burmeseShiftRow1, 'MM-shift-r1')
-          this.buildLogicalRow(this.burmeseShiftRow2, 'MM-shift-r2')
-          this.buildLetterThirdRow(this.burmeseShiftRow3, 'MM-shift-r3')
+          this.buildLogicalRow(this.isMmUnicodeLayout() ? this.mmUnicodeShiftRow1 : this.burmeseShiftRow1,
+            this.isMmUnicodeLayout() ? 'MM-unicode-shift-r1' : 'ZawCode-shift-r1')
+          this.buildLogicalRow(this.isMmUnicodeLayout() ? this.mmUnicodeShiftRow2 : this.burmeseShiftRow2,
+            this.isMmUnicodeLayout() ? 'MM-unicode-shift-r2' : 'ZawCode-shift-r2')
+          this.buildLetterThirdRow(this.isMmUnicodeLayout() ? this.mmUnicodeShiftRow3 : this.burmeseShiftRow3,
+            this.isMmUnicodeLayout() ? 'MM-unicode-shift-r3' : 'ZawCode-shift-r3')
         } else {
-          this.buildLogicalRow(this.burmeseNormalRow1, 'MM-normal-r1')
+          this.buildLogicalRow(this.isMmUnicodeLayout() ? this.mmUnicodeNormalRow1 : this.burmeseNormalRow1,
+            this.isMmUnicodeLayout() ? 'MM-unicode-normal-r1' : 'ZawCode-normal-r1')
           // This is a distinct 11-key row. Versioning its identity removes any
           // stale twelfth child from a previously loaded panel tree.
-          this.buildLogicalRow(this.burmeseNormalRow2, 'MM-normal-r2-v2')
-          this.buildLetterThirdRow(this.burmeseNormalRow3, 'MM-normal-r3')
+          this.buildLogicalRow(this.isMmUnicodeLayout() ? this.mmUnicodeNormalRow2 : this.burmeseNormalRow2,
+            this.isMmUnicodeLayout() ? 'MM-unicode-normal-r2-v2' : 'ZawCode-normal-r2-v2')
+          this.buildLetterThirdRow(this.isMmUnicodeLayout() ? this.mmUnicodeNormalRow3 : this.burmeseNormalRow3,
+            this.isMmUnicodeLayout() ? 'MM-unicode-normal-r3' : 'ZawCode-normal-r3')
         }
       } else {
         if (this.isNumbersLayer()) {

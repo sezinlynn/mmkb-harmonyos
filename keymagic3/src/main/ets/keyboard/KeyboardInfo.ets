@@ -28,26 +28,18 @@ export interface BundledKeyboardDefinition {
 // keyboards/bundled/, inspected through keymagic-core's Km2Loader.
 export const BUNDLED_KEYBOARD_DEFINITIONS: BundledKeyboardDefinition[] = [
   {
-    id: '',
-    name: 'မြန်စံ (Smart)',
-    locale: 'my-MM',
-    description: 'Converted into KeyMagic Layout from Official  Keyman Layout | by Thant Thet Khin Zaw',
-    author: 'Thant Thet Khin Zaw',
-    resourcePath: 'keyboards/.km2',
-  },
-  {
-    id: '-mm',
-    name: '',
-    locale: 'my-MM',
-    description: 'Burmese Layout',
-    resourcePath: 'keyboards/.km2',
-  },
-  {
     id: 'zawcode',
     name: 'ဇော်ကုဒ်',
     locale: 'my-MM',
     description: 'A Unicode Keyboard Layout that can be type the same sequence just like normal ZawGyi layout but the output is Unicode.',
     resourcePath: 'keyboards/ZawCode.km2',
+  },
+  {
+    id: 'mm-unicode',
+    name: 'MM Unicode',
+    locale: 'my-MM',
+    description: 'Myanmar Unicode smart input layout for mmKB.',
+    resourcePath: 'keyboards/MM Unicode.km2',
   },
 ];
 

@@ -1,6 +1,6 @@
 import { KeyMagicActionType, KeyMagicKeyInput, KeyMagicNative, KeyMagicProcessResult } from '../common/KeyMagicNative';
 import { keyMagicInputFromHarmonyEvent, keyMagicVirtualKeyFromHarmonyKeyCode, KeyMagicVirtualKey } from '../common/KeyMagicKeyMap';
-import { ExpectedEngineOutput, _VALIDATION_VECTORS } from '../common/KeyMagicValidationVectors';
+import { ExpectedEngineOutput, MM_UNICODE_VALIDATION_VECTORS } from '../common/KeyMagicValidationVectors';
 import { KeyCode } from '@kit.InputKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { preferences } from '@kit.ArkData';
@@ -132,7 +132,7 @@ struct Index {
 
   private async loadKeyboard(): Promise<void> {
     try {
-      await this.native.loadBundledKeyboard(this.applicationContext(), 'keyboards/.km2');
+      await this.native.loadBundledKeyboard(this.applicationContext(), 'keyboards/MM Unicode.km2');
       this.keyboardLoaded = true;
       this.status = 'Bundled .km2 loaded through Rust C FFI.';
     } catch (error) {
@@ -142,7 +142,7 @@ struct Index {
 
   private async reloadKeyboard(): Promise<void> {
     try {
-      await this.native.loadBundledKeyboard(this.applicationContext(), 'keyboards/.km2');
+      await this.native.loadBundledKeyboard(this.applicationContext(), 'keyboards/MM Unicode.km2');
       this.keyboardLoaded = true;
       this.composingText = '';
       this.status = 'Bundled .km2 reloaded into a fresh Rust engine state.';
@@ -408,7 +408,7 @@ struct Index {
     let passed = true;
 
     try {
-      for (const vector of _VALIDATION_VECTORS) {
+      for (const vector of MM_UNICODE_VALIDATION_VECTORS) {
         this.native.resetEngine();
         trace.push(`\u2713 ${vector.name}`);
         for (const step of vector.steps) {
@@ -424,7 +424,7 @@ struct Index {
         }
       }
       this.validationSummary = passed ?
-        `PASS: ${_VALIDATION_VECTORS.length}  vectors matched the bundled .km2.` :
+        `PASS: ${MM_UNICODE_VALIDATION_VECTORS.length} MM Unicode vectors matched the bundled .km2.` :
         'FAIL: inspect the step trace below before proceeding.';
       this.status = passed ?
         'All deterministic  vectors passed through ArkTS -> NAPI -> Rust.' :
@@ -473,7 +473,7 @@ struct Index {
     try {
       this.native.resetEngine();
       this.callNativeProcessKey({ keyCode: KeyMagicVirtualKey.KeyA, character: 'a' }, 'DETERMINISTIC reload validation: a');
-      await this.native.loadBundledKeyboard(this.applicationContext(), 'keyboards/.km2');
+      await this.native.loadBundledKeyboard(this.applicationContext(), 'keyboards/MM Unicode.km2');
       const result = this.callNativeProcessKey({ keyCode: KeyMagicVirtualKey.KeyU, character: 'u' }, 'DETERMINISTIC reload validation: u after reload');
       const expected: ExpectedEngineOutput = {
         actionType: KeyMagicActionType.Insert,
@@ -504,7 +504,7 @@ struct Index {
       for (let cycle = 1; cycle <= 5; cycle++) {
         this.native.destroyEngine();
         this.native.createEngine();
-        await this.native.loadBundledKeyboard(this.applicationContext(), 'keyboards/.km2');
+        await this.native.loadBundledKeyboard(this.applicationContext(), 'keyboards/MM Unicode.km2');
         const result = this.callNativeProcessKey({ keyCode: KeyMagicVirtualKey.KeyU, character: 'u' }, `DETERMINISTIC lifecycle validation cycle ${cycle}: u`);
         const expected: ExpectedEngineOutput = {
           actionType: KeyMagicActionType.Insert,

@@ -7,6 +7,7 @@
 **/.test/
 /.appanalyzer/
 /build-profile.json5
+/mmkb-harmonyos-clean.git/
 
 # Local IDE and SDK configuration
 /local.properties

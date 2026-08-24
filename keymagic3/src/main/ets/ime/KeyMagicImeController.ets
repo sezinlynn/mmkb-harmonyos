@@ -43,6 +43,7 @@ import {
   getVirtualKeyboardLanguageMode,
   KeyboardLanguageMode,
   setVirtualKeyboardLanguageMode,
+  setVirtualKeyboardLayoutId,
   setVirtualKeyPressHandler,
   VirtualKeyPress,
   VirtualKeyboardCommand,
@@ -1053,6 +1054,10 @@ export class KeyMagicImeController {
       this.handleVirtualBackspace(press.isBackspaceRepeat === true);
       return;
     }
+    if (press.literalText !== undefined) {
+      this.handleVirtualLiteralText(press.literalText, press.label);
+      return;
+    }
     if (getVirtualKeyboardLanguageMode() === KeyboardLanguageMode.English) {
       this.handleVirtualEnglishKeyPress(press);
       return;
@@ -1098,6 +1103,26 @@ export class KeyMagicImeController {
       hilog.error(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `Virtual Burmese KeyMagic handling failed: ${JSON.stringify(error)}`);
     }
+  }
+
+  /** Literal symbol keys bypass KeyMagic but preserve the safe deferred editor transport. */
+  private handleVirtualLiteralText(text: string, label: string): void {
+    const inputClient = this.inputClient;
+    if (inputClient === undefined) {
+      hilog.warn(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+        `Ignoring virtual literal key ${label}: no active input session.`);
+      return;
+    }
+    if (text.length === 0) {
+      return;
+    }
+    if (this.internalComposition.length > 0) {
+      this.commitCompositionAndReset(`virtual literal symbol ${label}`);
+    }
+    this.setVirtualShiftActive(false);
+    this.enqueueDeferredEnglishInsert(inputClient, text, 'virtual Burmese literal symbol');
+    hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
+      `VIRTUAL LITERAL KEY label=${label} textLength=${text.length} mode=${getVirtualKeyboardLanguageMode()}`);
   }
 
   /**
@@ -1983,6 +2008,7 @@ export class KeyMagicImeController {
       this.loadedKeyboardId = resource.keyboard.id;
       this.loadedKeyboardGeneration = selection.keyboardGeneration;
       this.keyboardLoaded = true;
+      setVirtualKeyboardLayoutId(resource.keyboard.id);
       hilog.info(IME_LOG_DOMAIN, IME_LOG_TAG, '%{public}s',
         `IME KEYBOARD RELOAD keyboardId=${selection.activeKeyboardId} ` +
           `keyboardGeneration=${selection.keyboardGeneration} ` +

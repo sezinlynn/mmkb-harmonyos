@@ -33,6 +33,8 @@ export interface VirtualKeyPress {
   preserveVirtualShift?: boolean;
   /** True only for an existing Backspace hold-repeat tick, never its initial DOWN. */
   isBackspaceRepeat?: boolean;
+  /** A literal symbol-layer value; it bypasses KeyMagic but retains IME transport. */
+  literalText?: string;
   /** A panel action that does not represent a KeyMagic key. */
   command?: VirtualKeyboardCommand;
   label: string;
@@ -40,6 +42,10 @@ export interface VirtualKeyPress {
 
 type VirtualKeyPressHandler = (press: VirtualKeyPress) => void;
 type VirtualKeyboardLanguageModeListener = (mode: KeyboardLanguageMode) => void;
+type VirtualKeyboardLayoutIdListener = (layoutId: string) => void;
+
+export const ZAWCODE_KEYBOARD_ID = 'zawcode';
+export const MM_UNICODE_KEYBOARD_ID = 'mm-unicode';
 
 // The IME controller and its panel run in the same InputMethodExtension
 // runtime. This bridge transports logical panel state only; it never owns
@@ -47,6 +53,8 @@ type VirtualKeyboardLanguageModeListener = (mode: KeyboardLanguageMode) => void;
 let handler: VirtualKeyPressHandler | undefined;
 let keyboardLanguageMode: KeyboardLanguageMode = KeyboardLanguageMode.Burmese;
 let keyboardLanguageModeListener: VirtualKeyboardLanguageModeListener | undefined;
+let keyboardLayoutId: string = ZAWCODE_KEYBOARD_ID;
+let keyboardLayoutIdListener: VirtualKeyboardLayoutIdListener | undefined;
 
 export function setVirtualKeyPressHandler(nextHandler: VirtualKeyPressHandler): void {
   handler = nextHandler;
@@ -91,5 +99,32 @@ export function setVirtualKeyboardLanguageModeListener(listener: VirtualKeyboard
 export function clearVirtualKeyboardLanguageModeListener(expectedListener: VirtualKeyboardLanguageModeListener): void {
   if (keyboardLanguageModeListener === expectedListener) {
     keyboardLanguageModeListener = undefined;
+  }
+}
+
+/** Reads the controller-owned selected KeyMagic layout for panel rendering. */
+export function getVirtualKeyboardLayoutId(): string {
+  return keyboardLayoutId;
+}
+
+/** Publishes the selected layout after the controller has loaded its KM2 data. */
+export function setVirtualKeyboardLayoutId(nextLayoutId: string): void {
+  if (keyboardLayoutId === nextLayoutId) {
+    return;
+  }
+  keyboardLayoutId = nextLayoutId;
+  if (keyboardLayoutIdListener !== undefined) {
+    keyboardLayoutIdListener(nextLayoutId);
+  }
+}
+
+export function setVirtualKeyboardLayoutIdListener(listener: VirtualKeyboardLayoutIdListener): void {
+  keyboardLayoutIdListener = listener;
+  listener(keyboardLayoutId);
+}
+
+export function clearVirtualKeyboardLayoutIdListener(expectedListener: VirtualKeyboardLayoutIdListener): void {
+  if (keyboardLayoutIdListener === expectedListener) {
+    keyboardLayoutIdListener = undefined;
   }
 }

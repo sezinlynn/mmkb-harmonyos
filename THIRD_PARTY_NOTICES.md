@@ -29,8 +29,7 @@ The following binary KeyMagic `.km2` layouts are bundled under `keymagic3/src/ma
 
 | Layout file | Embedded metadata observed | Licensing status |
 | --- | --- | --- |
-| `.km2` | “မြန်စံ (Smart)”; metadata says it was converted into a KeyMagic layout from the Official  Keyman Layout; credits Thant Thet Khin Zaw | Permission/licensing to be confirmed with the respective rights holder. |
-| `.km2` | “”; “, ” | Permission/licensing to be confirmed with the respective rights holder. |
+| `MM Unicode.km2` | “MM Unicode”; “Myanmar Unicode smart input layout for mmKB” | MM Unicode was developed with reference to the MyanSan KeyMagic layout. Permission/licensing must be confirmed with the respective rights holder before redistribution. |
 | `ZawCode.km2` | “ဇော်ကုဒ်”; credits `TharLon` | Permission/licensing to be confirmed with the respective rights holder. |
 
 These keyboard-layout files are **not** asserted to be GPL merely because the KeyMagic engine is GPL. Obtain and record written permission or an explicit license for each layout before claiming broad redistribution rights.
